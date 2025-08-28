@@ -1,0 +1,9 @@
+[project]
+name = "retracesoftware_stream"
+version = "0.1.0"
+license = {text = "Apache-2.0"}
+dependencies = []
+
+[build-system]
+requires = ["meson-python>=0.15.0", "meson>=1.4", "ninja"]
+build-backend = "mesonpy"
