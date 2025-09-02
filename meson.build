@@ -13,6 +13,10 @@ install_subdir('proxy', install_dir: py.get_install_dir() / 'retracesoftware')
 #  'proxy/replay.py',
 #  subdir: 'retracesoftware'
 
+py.install_sources(
+  'src/stream.py',
+  subdir: 'retracesoftware')
+
 py.extension_module(
   'retracesoftware_stream',
   sources: [

@@ -369,6 +369,7 @@ namespace retracesoftware_stream {
 
             if (transform) {
                 PyObject * new_ref = PyObject_CallOneArg(transform, ref);
+
                 Py_DECREF(ref);
                 if (!new_ref) {
                     throw nullptr;

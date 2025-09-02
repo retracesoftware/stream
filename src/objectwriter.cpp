@@ -63,7 +63,7 @@ namespace retracesoftware_stream {
         int next_handle;
 
         map<PyObject *, uint64_t> placeholders;
-        map<PyTypeObject *, retracesoftware::FastCall> type_serializers;
+        // map<PyTypeObject *, retracesoftware::FastCall> type_serializers;
 
         // PyTypeObject * enumtype;
 
@@ -157,14 +157,22 @@ namespace retracesoftware_stream {
 
             if (!res) {
                 throw nullptr;
-            } else if (!PyBytes_Check(res)) {
-                PyErr_Format(PyExc_TypeError, "serializer function %S return an object which was not bytes: %S", serializer, res);
-                Py_DECREF(res);
-                throw nullptr;
             } else {
-                write_pickled(res);
+                if (PyBytes_Check(res)) {
+                    write_pickled(res);
+                } else {
+                    write(res);
+                }
                 Py_DECREF(res);
-            }
+            }            
+            // else if (!PyBytes_Check(res)) {
+            //     PyErr_Format(PyExc_TypeError, "serializer function %S return an object which was not bytes: %S", serializer, res);
+            //     Py_DECREF(res);
+            //     throw nullptr;
+            // } else {
+            //     write_pickled(res);
+            //     Py_DECREF(res);
+            // }
         }
 
         void write_bignum(PyObject * pylong) {
@@ -705,12 +713,12 @@ namespace retracesoftware_stream {
             else if (Py_TYPE(obj) == &PyMemoryView_Type) write_memory_view(obj);
             else if (Py_TYPE(obj) == &StreamHandle_Type) write_stream_handle(obj);
 
-            else if (type_serializers.contains(Py_TYPE(obj))) {
-                PyObject * res = type_serializers[Py_TYPE(obj)](obj);
-                if (!res) throw nullptr;
-                write(res);
-                Py_DECREF(res);
-            }
+            // else if (type_serializers.contains(Py_TYPE(obj))) {
+            //     PyObject * res = type_serializers[Py_TYPE(obj)](obj);
+            //     if (!res) throw nullptr;
+            //     write(res);
+            //     Py_DECREF(res);
+            // }
 
             // else if (Py_TYPE(obj) == &StableSet_Type) write_stableset(obj);
             // else if (Py_TYPE(obj) == &StableFrozenSet_Type) write_stablefrozenset(obj);
@@ -839,28 +847,28 @@ namespace retracesoftware_stream {
             }
         }
 
-        static PyObject * py_add_type_serializer(ObjectWriter * self, PyObject* args, PyObject* kwds) {
-            PyTypeObject * cls;
-            PyObject * serializer;
+        // static PyObject * py_add_type_serializer(ObjectWriter * self, PyObject* args, PyObject* kwds) {
+        //     PyTypeObject * cls;
+        //     PyObject * serializer;
 
-            static const char* kwlist[] = {"cls", "serializer", nullptr};  // Keywords allowed
+        //     static const char* kwlist[] = {"cls", "serializer", nullptr};  // Keywords allowed
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!O", (char **)kwlist, &PyType_Type, &cls, &serializer)) {
-                return nullptr;  
-                // Return NULL to propagate the parsing error
-            }
-            if (self->type_serializers.contains(cls)) {
-                PyErr_Format(PyExc_RuntimeError, "Could not add serializer for type: %S as serializer for given type already exists", cls);
-                return nullptr;
-            }
-            Py_INCREF(cls);
+        //     if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!O", (char **)kwlist, &PyType_Type, &cls, &serializer)) {
+        //         return nullptr;  
+        //         // Return NULL to propagate the parsing error
+        //     }
+        //     if (self->type_serializers.contains(cls)) {
+        //         PyErr_Format(PyExc_RuntimeError, "Could not add serializer for type: %S as serializer for given type already exists", cls);
+        //         return nullptr;
+        //     }
+        //     Py_INCREF(cls);
 
-            self->type_serializers[cls] = retracesoftware::FastCall(Py_NewRef(serializer));
-            assert(self->type_serializers[cls].vectorcall);
-            assert(self->type_serializers[cls].callable);
+        //     self->type_serializers[cls] = retracesoftware::FastCall(Py_NewRef(serializer));
+        //     assert(self->type_serializers[cls].vectorcall);
+        //     assert(self->type_serializers[cls].callable);
 
-            Py_RETURN_NONE;
-        }
+        //     Py_RETURN_NONE;
+        // }
 
         static int init(ObjectWriter * self, PyObject* args, PyObject* kwds) {
 
@@ -882,7 +890,7 @@ namespace retracesoftware_stream {
             self->next_handle = 0;
             
             new (&self->placeholders) map<PyObject *, uint64_t>();
-            new (&self->type_serializers) map<PyTypeObject *, retracesoftware::FastCall>();
+            // new (&self->type_serializers) map<PyTypeObject *, retracesoftware::FastCall>();
 
             self->file = open(path, false);
             self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectWriter::py_vectorcall);
@@ -993,7 +1001,7 @@ namespace retracesoftware_stream {
     };
 
     static PyMethodDef methods[] = {
-        {"add_type_serializer", (PyCFunction)ObjectWriter::py_add_type_serializer, METH_VARARGS | METH_KEYWORDS, "Creates handle"},
+        // {"add_type_serializer", (PyCFunction)ObjectWriter::py_add_type_serializer, METH_VARARGS | METH_KEYWORDS, "Creates handle"},
         {"placeholder", (PyCFunction)ObjectWriter::py_placeholder, METH_O, "Creates handle"},
         {"handle", (PyCFunction)ObjectWriter::py_handle, METH_O, "Creates handle"},
         {"write", (PyCFunction)ObjectWriter::py_write, METH_O, "Write's object returning a handle for future writes"},
