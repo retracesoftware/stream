@@ -4,15 +4,6 @@ project('retracesoftware_stream', 'cpp', default_options: ['cpp_std=c++20'])
 # Bind to the interpreter Meson/meson-python wants us to use.
 py = import('python').find_installation()
 
-install_subdir('proxy', install_dir: py.get_install_dir() / 'retracesoftware')
-
-#  'proxy/__init__.py',
-#  'proxy/install.py',
-#  'proxy/proxyfactory.py',
-#  'proxy/record.py',
-#  'proxy/replay.py',
-#  subdir: 'retracesoftware'
-
 py.install_sources(
   'src/stream.py',
   subdir: 'retracesoftware')
