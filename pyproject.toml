@@ -3,6 +3,7 @@ name = "retracesoftware_stream"
 version = "0.1.0"
 license = {text = "Apache-2.0"}
 dependencies = []
+#dependencies = ["retracesoftware_functional", "retracesoftware_utils"]
 
 [build-system]
 requires = ["meson-python>=0.15.0", "meson>=1.4", "ninja"]

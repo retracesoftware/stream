@@ -19,6 +19,7 @@ namespace retracesoftware_stream {
             case FixedSizeTypes::FALSE: return "FALSE";
             case FixedSizeTypes::NEW_HANDLE: return "NEW_HANDLE";
             case FixedSizeTypes::REF: return "REF";
+            // case FixedSizeTypes::PLACEHOLDER: return "PLACEHOLDER";
 
             // case FixedSizeTypes::EXTREF: return "EXTREF";
             // case FixedSizeTypes::CACHE_LOOKUP: return "CACHE_LOOKUP";
@@ -414,16 +415,16 @@ namespace retracesoftware_stream {
                 : read_sized(control);
         }
 
-        static PyObject * py_supply(ObjectReader *self, PyObject * target) {
-            uint8_t control = self->next_control();
+        // static PyObject * py_supply(ObjectReader *self, PyObject * target) {
+        //     uint8_t control = self->next_control();
 
-            if (control != (0xF0 | FixedSizeTypes::PLACEHOLDER)) {
-                PyErr_Format(PyExc_RuntimeError, "Expected next element to be a PLACEHOLDER but was...");
-                return nullptr;
-            }
-            self->lookup[self->next_handle++] = Py_NewRef(target);
-            return Py_NewRef(target);
-        }
+        //     if (control != (0xF0 | FixedSizeTypes::PLACEHOLDER)) {
+        //         PyErr_Format(PyExc_RuntimeError, "Expected next element to be a PLACEHOLDER but was...");
+        //         return nullptr;
+        //     }
+        //     self->lookup[self->next_handle++] = Py_NewRef(target);
+        //     return Py_NewRef(target);
+        // }
 
         static PyObject* py_vectorcall(ObjectReader* self, PyObject*const * args, size_t nargsf, PyObject* kwnames) {
             if (kwnames || PyVectorcall_NARGS(nargsf) > 0) {
@@ -563,7 +564,7 @@ namespace retracesoftware_stream {
     };
 
     static PyMethodDef methods[] = {
-        {"supply", (PyCFunction)ObjectReader::py_supply, METH_O, "supply the placeholder"},
+        // {"supply", (PyCFunction)ObjectReader::py_supply, METH_O, "supply the placeholder"},
         // {"intern", (PyCFunction)ObjectWriter::py_intern, METH_FASTCALL, "TODO"},
         // {"replace", (PyCFunction)ObjectWriter::py_replace, METH_VARARGS | METH_KEYWORDS, "TODO"},
         // {"unique", (PyCFunction)ObjectWriter::py_unique, METH_O, "TODO"},

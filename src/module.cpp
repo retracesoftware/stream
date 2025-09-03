@@ -4,7 +4,7 @@
 static PyTypeObject * hidden_types[] = {
     // &_proxy::Pickled_Type,
     &retracesoftware_stream::StreamHandle_Type,
-    &retracesoftware_stream::WeakRefCallback_Type,
+    // &retracesoftware_stream::WeakRefCallback_Type,
     nullptr
 };
 
@@ -14,7 +14,25 @@ static PyTypeObject * exposed_types[] = {
     nullptr
 };
 
+static PyObject * thread_id(PyObject * module, PyObject * unused) {
+    PyObject * id = PyDict_GetItem(PyThreadState_GetDict(), module);
+
+    return Py_NewRef(id ? id : Py_None);
+}
+
+static PyObject * set_thread_id(PyObject * module, PyObject * id) {
+
+    if (PyDict_SetItem(PyThreadState_GetDict(), module, Py_NewRef(id)) == -1) {
+        Py_DECREF(id);        
+        return nullptr;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef module_methods[] = {
+    {"thread_id", (PyCFunction)thread_id, METH_NOARGS, "TODO"},
+    {"set_thread_id", (PyCFunction)set_thread_id, METH_O, "TODO"},
+
     // {"create_wrapping_proxy_type", (PyCFunction)create_wrapping_proxy_type, METH_VARARGS | METH_KEYWORDS, "TODO"},
     // {"unwrap_apply", (PyCFunction)unwrap_apply, METH_FASTCALL | METH_KEYWORDS, "Call the wrapped target with unproxied *args/**kwargs."},
     // {"thread_id", (PyCFunction)thread_id, METH_NOARGS, "TODO"},

@@ -5,9 +5,8 @@
 #include <fcntl.h>
 #include <sstream>
 #include <sys/file.h>
-#include "unordered_dense.h"
-
-using namespace ankerl::unordered_dense;
+// #include "unordered_dense.h"
+// using namespace ankerl::unordered_dense;
 
 namespace retracesoftware_stream {
 
@@ -62,7 +61,7 @@ namespace retracesoftware_stream {
         size_t messages_written;
         int next_handle;
 
-        map<PyObject *, uint64_t> placeholders;
+        // map<PyObject *, uint64_t> placeholders;
         // map<PyTypeObject *, retracesoftware::FastCall> type_serializers;
 
         // PyTypeObject * enumtype;
@@ -83,8 +82,14 @@ namespace retracesoftware_stream {
 
         static PyObject * StreamHandle_vectorcall(StreamHandle * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
             
+            ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
+
+            if (!writer->file) {
+                PyErr_Format(PyExc_RuntimeError, "Cannot write to file: %S as its closed", writer->path);
+                return nullptr;
+            }
             try {
-                ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
+                
 
                 writer->write_handle_ref(self->index);
 
@@ -94,7 +99,7 @@ namespace retracesoftware_stream {
                     writer->write(args[i]);
                 }
 
-                return Py_NewRef(total_args == 1 ? args[0] : Py_None);
+                Py_RETURN_NONE;
 
             } catch (...) {
                 return nullptr;
@@ -437,34 +442,49 @@ namespace retracesoftware_stream {
         // }
 
         static FILE * open(PyObject * path, bool append) {
-            PyObject * path_str = PyObject_Str(path);
-            if (!path_str) throw nullptr;
 
-            // int fd = open(PyUnicode_AsUTF8(path_str), O_WRONLY | O_CREAT | O_EXCL, 0644);
-            
-            const char * mode = append ? "ab" : "wb";
+            if (PyCallable_Check(path)) {
+                PyObject * res = PyObject_CallNoArgs(path);
 
-            FILE * file = fopen(PyUnicode_AsUTF8(path_str), mode);
+                if (!res) throw nullptr;
 
-            Py_DECREF(path_str);
+                FILE * file = open(res, append);
+                
+                Py_DECREF(res);
 
-            if (!file) {
-                PyErr_Format(PyExc_IOError, "Could not open file: %S, mode: %s for writing, error: %s", path, mode, strerror(errno));
-                throw nullptr;
+                return file;
+
+            } else {
+
+                PyObject * path_str = PyObject_Str(path);
+                if (!path_str) throw nullptr;
+
+                // int fd = open(PyUnicode_AsUTF8(path_str), O_WRONLY | O_CREAT | O_EXCL, 0644);
+                
+                const char * mode = append ? "ab" : "wb";
+
+                FILE * file = fopen(PyUnicode_AsUTF8(path_str), mode);
+
+                Py_DECREF(path_str);
+
+                if (!file) {
+                    PyErr_Format(PyExc_IOError, "Could not open file: %S, mode: %s for writing, error: %s", path, mode, strerror(errno));
+                    throw nullptr;
+                }
+
+                int fd = fileno(file);
+                
+                if (flock(fd, LOCK_EX | LOCK_NB) == -1) {
+                    fprintf(stderr, "TRIED TO LOCK AN ALREADY LOCKED FILE!!!!\n");
+
+                    PyErr_Format(PyExc_IOError, "Could not lock file: %S for exclusive access, error: %s", path, strerror(errno));
+                    // perror("flock");
+                    // // Handle locking failure: another process holds the lock
+                    fclose(file);
+                    throw nullptr;
+                }
+                return file;
             }
-
-            int fd = fileno(file);
-            
-            if (flock(fd, LOCK_EX | LOCK_NB) == -1) {
-                fprintf(stderr, "TRIED TO LOCK AN ALREADY LOCKED FILE!!!!\n");
-
-                PyErr_Format(PyExc_IOError, "Could not lock file: %S for exclusive access, error: %s", path, strerror(errno));
-                // perror("flock");
-                // // Handle locking failure: another process holds the lock
-                fclose(file);
-                throw nullptr;
-            }
-            return file;
         }
 
         inline void write(FixedSizeTypes obj) {
@@ -708,7 +728,7 @@ namespace retracesoftware_stream {
             // else if (Py_TYPE(obj) == &Pickled_Type) write_pickled(obj);
             else if (Py_TYPE(obj) == &PyFloat_Type) write_float(obj);
 
-            else if (placeholders.contains(obj)) write_handle_ref(placeholders[obj]);
+            // else if (placeholders.contains(obj)) write_handle_ref(placeholders[obj]);
 
             else if (Py_TYPE(obj) == &PyMemoryView_Type) write_memory_view(obj);
             else if (Py_TYPE(obj) == &StreamHandle_Type) write_stream_handle(obj);
@@ -767,7 +787,11 @@ namespace retracesoftware_stream {
                 PyErr_SetString(PyExc_TypeError, "ObjectWriter does not accept keyword arguments");
                 return nullptr;
             }
-
+            
+            if (!self->file) {
+                PyErr_Format(PyExc_RuntimeError, "Cannot write to file: %S as its closed", self->path);
+                return nullptr;
+            }
             try {
                 size_t nargs = PyVectorcall_NARGS(nargsf);
 
@@ -784,8 +808,44 @@ namespace retracesoftware_stream {
                         self->file = nullptr;
                     }
                 }
-                return Py_NewRef(nargs == 1 ? args[0] : Py_None);
+                Py_RETURN_NONE;
 
+            } catch (...) {
+                return nullptr;
+            }
+        }
+
+        static PyObject * py_flush(ObjectWriter * self, PyObject* unused) {
+            try {
+                if (self->file) fflush(self->file);
+                Py_RETURN_NONE;
+            } catch (...) {
+                return nullptr;
+            }
+        }
+
+        static PyObject * py_close(ObjectWriter * self, PyObject* unused) {
+            if (!self->file) {
+                PyErr_Format(PyExc_RuntimeError, "File %S is already closed", self->file);
+                return nullptr;
+            }
+
+            if (self->file) {
+                fclose(self->file);
+                self->file = nullptr;
+            }
+            Py_RETURN_NONE;
+        }
+
+        static PyObject * py_reopen(ObjectWriter * self, PyObject* unused) {
+            if (self->file) {
+                PyErr_Format(PyExc_RuntimeError, "File %S is already opened", self->file);
+                return nullptr;
+            }
+            
+            try {
+                self->file = open(self->path, true);
+                Py_RETURN_NONE;
             } catch (...) {
                 return nullptr;
             }
@@ -799,45 +859,45 @@ namespace retracesoftware_stream {
             }
         }
 
-        static PyObject * WeakRefCallback_vectorcall(WeakRefCallback * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
+        // static PyObject * WeakRefCallback_vectorcall(WeakRefCallback * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
             
-            ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
+        //     ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
 
-            assert(writer->placeholders.contains(self->handle));
+        //     assert(writer->placeholders.contains(self->handle));
 
-            writer->write_delete(writer->placeholders[self->handle]);
-            writer->placeholders.erase(self->handle);
+        //     writer->write_delete(writer->placeholders[self->handle]);
+        //     writer->placeholders.erase(self->handle);
 
-            Py_DECREF(args[0]);
-            Py_RETURN_NONE;
-        }
+        //     Py_DECREF(args[0]);
+        //     Py_RETURN_NONE;
+        // }
 
-        PyObject * weakref_callback(PyObject* handle) {
-            WeakRefCallback * self = (WeakRefCallback *)WeakRefCallback_Type.tp_alloc(&WeakRefCallback_Type, 0);
-            if (!self) return nullptr;
+        // PyObject * weakref_callback(PyObject* handle) {
+        //     WeakRefCallback * self = (WeakRefCallback *)WeakRefCallback_Type.tp_alloc(&WeakRefCallback_Type, 0);
+        //     if (!self) return nullptr;
 
-            self->writer = Py_NewRef(this);
-            self->handle = handle;
-            self->vectorcall = (vectorcallfunc)WeakRefCallback_vectorcall;
+        //     self->writer = Py_NewRef(this);
+        //     self->handle = handle;
+        //     self->vectorcall = (vectorcallfunc)WeakRefCallback_vectorcall;
             
-            return (PyObject *)self;
-        }
+        //     return (PyObject *)self;
+        // }
 
-        static PyObject * py_placeholder(ObjectWriter * self, PyObject* obj) {
+        // static PyObject * py_placeholder(ObjectWriter * self, PyObject* obj) {
 
-            PyObject * callback = self->weakref_callback(obj);
+        //     PyObject * callback = self->weakref_callback(obj);
 
-            if (!PyWeakref_NewRef(obj, callback)) {
-                Py_DECREF(callback);
-                return nullptr;
-            }
-            Py_DECREF(callback);
+        //     if (!PyWeakref_NewRef(obj, callback)) {
+        //         Py_DECREF(callback);
+        //         return nullptr;
+        //     }
+        //     Py_DECREF(callback);
             
-            self->write(FixedSizeTypes::PLACEHOLDER);
-            self->placeholders[obj] = self->next_handle++;
+        //     self->write(FixedSizeTypes::PLACEHOLDER);
+        //     self->placeholders[obj] = self->next_handle++;
 
-            Py_RETURN_NONE;
-        }
+        //     Py_RETURN_NONE;
+        // }
 
         static PyObject * py_handle(ObjectWriter * self, PyObject* obj) {
             try {
@@ -889,7 +949,7 @@ namespace retracesoftware_stream {
             // enumtype(enumtype);
             self->next_handle = 0;
             
-            new (&self->placeholders) map<PyObject *, uint64_t>();
+            // new (&self->placeholders) map<PyObject *, uint64_t>();
             // new (&self->type_serializers) map<PyTypeObject *, retracesoftware::FastCall>();
 
             self->file = open(path, false);
@@ -972,19 +1032,19 @@ namespace retracesoftware_stream {
         }
     };
 
-    PyTypeObject WeakRefCallback_Type = {
-        .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
-        .tp_name = MODULE "WeakRefCallback",
-        .tp_basicsize = sizeof(WeakRefCallback),
-        .tp_itemsize = 0,
-        .tp_dealloc = generic_gc_dealloc,
-        .tp_vectorcall_offset = OFFSET_OF_MEMBER(WeakRefCallback, vectorcall),
-        .tp_call = PyVectorcall_Call,
-        .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_HAVE_VECTORCALL,
-        .tp_doc = "TODO",
-        .tp_traverse = (traverseproc)WeakRefCallback::traverse,
-        .tp_clear = (inquiry)WeakRefCallback::clear,
-    };
+    // PyTypeObject WeakRefCallback_Type = {
+    //     .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
+    //     .tp_name = MODULE "WeakRefCallback",
+    //     .tp_basicsize = sizeof(WeakRefCallback),
+    //     .tp_itemsize = 0,
+    //     .tp_dealloc = generic_gc_dealloc,
+    //     .tp_vectorcall_offset = OFFSET_OF_MEMBER(WeakRefCallback, vectorcall),
+    //     .tp_call = PyVectorcall_Call,
+    //     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_HAVE_VECTORCALL,
+    //     .tp_doc = "TODO",
+    //     .tp_traverse = (traverseproc)WeakRefCallback::traverse,
+    //     .tp_clear = (inquiry)WeakRefCallback::clear,
+    // };
 
     PyTypeObject StreamHandle_Type = {
         .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
@@ -1002,9 +1062,12 @@ namespace retracesoftware_stream {
 
     static PyMethodDef methods[] = {
         // {"add_type_serializer", (PyCFunction)ObjectWriter::py_add_type_serializer, METH_VARARGS | METH_KEYWORDS, "Creates handle"},
-        {"placeholder", (PyCFunction)ObjectWriter::py_placeholder, METH_O, "Creates handle"},
+        // {"placeholder", (PyCFunction)ObjectWriter::py_placeholder, METH_O, "Creates handle"},
         {"handle", (PyCFunction)ObjectWriter::py_handle, METH_O, "Creates handle"},
         {"write", (PyCFunction)ObjectWriter::py_write, METH_O, "Write's object returning a handle for future writes"},
+        {"flush", (PyCFunction)ObjectWriter::py_flush, METH_NOARGS, "TODO"},
+        {"close", (PyCFunction)ObjectWriter::py_close, METH_NOARGS, "TODO"},
+        {"reopen", (PyCFunction)ObjectWriter::py_reopen, METH_NOARGS, "TODO"},
         // {"unique", (PyCFunction)ObjectWriter::py_unique, METH_O, "TODO"},
         // {"delete", (PyCFunction)ObjectWriter::py_delete, METH_O, "TODO"},
 

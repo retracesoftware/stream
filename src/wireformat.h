@@ -56,7 +56,7 @@ namespace retracesoftware_stream {
         // GLOBAL,
         NEW_HANDLE,
         INLINE_NEW_HANDLE,
-        PLACEHOLDER,
+        // PLACEHOLDER,
         REF,
         INT64,
 

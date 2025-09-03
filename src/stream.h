@@ -24,7 +24,7 @@ namespace retracesoftware_stream {
     extern PyTypeObject ObjectWriter_Type;
     extern PyTypeObject ObjectReader_Type;
     extern PyTypeObject StreamHandle_Type;
-    extern PyTypeObject WeakRefCallback_Type;
+    // extern PyTypeObject WeakRefCallback_Type;
     // extern PyTypeObject ObjectReader_Type;
 
     inline void generic_gc_dealloc(PyObject *self) {
