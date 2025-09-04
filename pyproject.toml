@@ -1,6 +1,6 @@
 [project]
 name = "retracesoftware_stream"
-version = "0.1.1"
+version = "0.1.2"
 description = "Binary stream reader/writer for retracesoftware"
 readme = "README.md"
 license = {text = "Apache-2.0"}
