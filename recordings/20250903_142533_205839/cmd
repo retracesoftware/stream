@@ -1,0 +1,5 @@
+[
+  "/tmp/rt/bin/python",
+  "-c",
+  "print('retrace hook active')"
+]

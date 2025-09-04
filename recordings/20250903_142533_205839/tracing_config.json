@@ -1,0 +1,21 @@
+[
+  "proxy.wrapping.new",
+  "proxy.wrapping.new.method",
+  "proxy.int_to_ext.stack",
+  "proxy.ext_to_int.wrap",
+  "proxy.int.handler",
+  "proxy.int.newref",
+  "proxy.ext.call",
+  "proxy.ext.result",
+  "proxy.ext.error",
+  "proxy.int.result",
+  "proxy.int.error",
+  "proxy.ext.new.extended",
+  "proxy.ext.new.extended.method",
+  "proxy.ext.new.extended.member",
+  "proxy.int.new.extended",
+  "proxy.int.new.extended.method",
+  "install.module",
+  "install.module.phase",
+  "install.module.phase.results"
+]
