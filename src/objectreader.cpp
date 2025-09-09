@@ -330,7 +330,7 @@ namespace retracesoftware_stream {
                 case FixedSizeTypes::FALSE: return Py_NewRef(Py_False);
                 case FixedSizeTypes::NEG1: return PyLong_FromLong(-1);
                 case FixedSizeTypes::FLOAT: return PyFloat_FromDouble(read_float());
-                case FixedSizeTypes::INLINE_NEW_HANDLE: return Py_NewRef(store_handle());
+                // case FixedSizeTypes::INLINE_NEW_HANDLE: return Py_NewRef(store_handle());
                 default:
                     raise(SIGTRAP);
 
@@ -365,7 +365,7 @@ namespace retracesoftware_stream {
             }
         }
 
-        PyObject * store_handle() {
+        PyObject * store_handle() {            
             PyObject * ref = read();
 
             if (transform) {
@@ -436,6 +436,7 @@ namespace retracesoftware_stream {
                 self->messages_read++;
                 return result;
             } catch (...) {
+                assert (PyErr_Occurred());
                 return nullptr;
             }
         }

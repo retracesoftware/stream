@@ -135,8 +135,8 @@ namespace retracesoftware_stream {
             return (PyObject *)self;
         }
 
-        PyObject * handle(PyObject * obj, bool lookup) {
-            write(lookup ? FixedSizeTypes::INLINE_NEW_HANDLE : FixedSizeTypes::NEW_HANDLE);
+        PyObject * handle(PyObject * obj) {
+            write(FixedSizeTypes::NEW_HANDLE);
             write(obj);
             return stream_handle(next_handle++);
         }
@@ -851,13 +851,13 @@ namespace retracesoftware_stream {
             }
         }
 
-        static PyObject * py_write(ObjectWriter * self, PyObject* obj) {
-            try {
-                return self->handle(obj, true);
-            } catch (...) {
-                return nullptr;
-            }
-        }
+        // static PyObject * py_write(ObjectWriter * self, PyObject* obj) {
+        //     try {
+        //         return self->handle(obj, true);
+        //     } catch (...) {
+        //         return nullptr;
+        //     }
+        // }
 
         // static PyObject * WeakRefCallback_vectorcall(WeakRefCallback * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
             
@@ -901,7 +901,7 @@ namespace retracesoftware_stream {
 
         static PyObject * py_handle(ObjectWriter * self, PyObject* obj) {
             try {
-                return self->handle(obj, false);
+                return self->handle(obj);
             } catch (...) {
                 return nullptr;
             }
@@ -1064,7 +1064,7 @@ namespace retracesoftware_stream {
         // {"add_type_serializer", (PyCFunction)ObjectWriter::py_add_type_serializer, METH_VARARGS | METH_KEYWORDS, "Creates handle"},
         // {"placeholder", (PyCFunction)ObjectWriter::py_placeholder, METH_O, "Creates handle"},
         {"handle", (PyCFunction)ObjectWriter::py_handle, METH_O, "Creates handle"},
-        {"write", (PyCFunction)ObjectWriter::py_write, METH_O, "Write's object returning a handle for future writes"},
+        // {"write", (PyCFunction)ObjectWriter::py_write, METH_O, "Write's object returning a handle for future writes"},
         {"flush", (PyCFunction)ObjectWriter::py_flush, METH_NOARGS, "TODO"},
         {"close", (PyCFunction)ObjectWriter::py_close, METH_NOARGS, "TODO"},
         {"reopen", (PyCFunction)ObjectWriter::py_reopen, METH_NOARGS, "TODO"},
