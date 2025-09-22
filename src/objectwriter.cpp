@@ -89,14 +89,14 @@ namespace retracesoftware_stream {
                 return nullptr;
             }
             try {
-                
-
                 writer->write_handle_ref(self->index);
+                writer->messages_written++;
 
                 size_t total_args = PyVectorcall_NARGS(nargsf) + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0);
 
                 for (size_t i = 0; i < total_args; i++) {
                     writer->write(args[i]);
+                    writer->messages_written++;
                 }
 
                 Py_RETURN_NONE;
@@ -138,6 +138,7 @@ namespace retracesoftware_stream {
         PyObject * handle(PyObject * obj) {
             write(FixedSizeTypes::NEW_HANDLE);
             write(obj);
+            // messages_written++;
             return stream_handle(next_handle++);
         }
 
