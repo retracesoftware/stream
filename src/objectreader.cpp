@@ -19,6 +19,7 @@ namespace retracesoftware_stream {
             case FixedSizeTypes::FALSE: return "FALSE";
             case FixedSizeTypes::NEW_HANDLE: return "NEW_HANDLE";
             case FixedSizeTypes::REF: return "REF";
+            case FixedSizeTypes::INT64: return "INT64";
             // case FixedSizeTypes::PLACEHOLDER: return "PLACEHOLDER";
 
             // case FixedSizeTypes::EXTREF: return "EXTREF";
@@ -246,7 +247,7 @@ namespace retracesoftware_stream {
             return Py_NewRef(list.get());
         }
 
-                PyObject * read_tuple(size_t size) {
+        PyObject * read_tuple(size_t size) {
             assert (!PyErr_Occurred());
 
             auto tuple = PyObjectPtr(PyTuple_New(size));
@@ -330,6 +331,7 @@ namespace retracesoftware_stream {
                 case FixedSizeTypes::FALSE: return Py_NewRef(Py_False);
                 case FixedSizeTypes::NEG1: return PyLong_FromLong(-1);
                 case FixedSizeTypes::FLOAT: return PyFloat_FromDouble(read_float());
+                case FixedSizeTypes::INT64: return PyLong_FromLongLong(read_int64());
                 // case FixedSizeTypes::INLINE_NEW_HANDLE: return Py_NewRef(store_handle());
                 default:
                     raise(SIGTRAP);
@@ -562,9 +564,21 @@ namespace retracesoftware_stream {
                 }
             }
         }
+
+        static PyObject * py_load_hash_secret(ObjectReader * self, PyObject* unused) {                
+            try {
+                self->read((uint8_t *)&_Py_HashSecret, sizeof(_Py_HashSecret_t));
+                Py_RETURN_NONE;
+            } catch (...) {
+                return nullptr;
+            }
+
+        }
     };
 
     static PyMethodDef methods[] = {
+        {"load_hash_secret", (PyCFunction)ObjectReader::py_load_hash_secret, METH_NOARGS, "TODO"},
+
         // {"supply", (PyCFunction)ObjectReader::py_supply, METH_O, "supply the placeholder"},
         // {"intern", (PyCFunction)ObjectWriter::py_intern, METH_FASTCALL, "TODO"},
         // {"replace", (PyCFunction)ObjectWriter::py_replace, METH_VARARGS | METH_KEYWORDS, "TODO"},
@@ -572,7 +586,8 @@ namespace retracesoftware_stream {
         // {"delete", (PyCFunction)ObjectWriter::py_delete, METH_O, "TODO"},
 
         // {"tuple", (PyCFunction)ObjectWriter::py_write_tuple, METH_FASTCALL, "TODO"},
-        // {"dict", (PyCFunction)ObjectWriter::, METH_FASTCALL | METH_KEYWORDS, "TODO"},
+        // // {"dict", (PyCFunction)ObjectWriter::, METH_FASTCALL | METH_KEYWORDS, "TODO"},
+
 
         {NULL}  // Sentinel
     };

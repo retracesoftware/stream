@@ -1,6 +1,6 @@
 import retracesoftware_stream as _stream
 from retracesoftware_stream import *
-# import retracesoftware_utils as utils
+# import retracesoftware.utils as utils
 # import retracesoftware.functional as functional
 
 import pickle

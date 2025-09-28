@@ -852,6 +852,16 @@ namespace retracesoftware_stream {
             }
         }
 
+        static PyObject * py_store_hash_secret(ObjectWriter * self, PyObject* unused) {                
+            try {
+                void *secret = &_Py_HashSecret;
+                self->write((const uint8_t *)secret, sizeof(_Py_HashSecret_t));
+                Py_RETURN_NONE;
+            } catch (...) {
+                return nullptr;
+            }
+        }
+
         // static PyObject * py_write(ObjectWriter * self, PyObject* obj) {
         //     try {
         //         return self->handle(obj, true);
@@ -1069,6 +1079,7 @@ namespace retracesoftware_stream {
         {"flush", (PyCFunction)ObjectWriter::py_flush, METH_NOARGS, "TODO"},
         {"close", (PyCFunction)ObjectWriter::py_close, METH_NOARGS, "TODO"},
         {"reopen", (PyCFunction)ObjectWriter::py_reopen, METH_NOARGS, "TODO"},
+        {"store_hash_secret", (PyCFunction)ObjectWriter::py_store_hash_secret, METH_NOARGS, "TODO"},
         // {"unique", (PyCFunction)ObjectWriter::py_unique, METH_O, "TODO"},
         // {"delete", (PyCFunction)ObjectWriter::py_delete, METH_O, "TODO"},
 
