@@ -4,11 +4,12 @@ from retracesoftware_stream import *
 # import retracesoftware.functional as functional
 
 import pickle
+import inspect
 
 class writer(_stream.ObjectWriter):
 
-    def __init__(self, path):
-        super().__init__(path, serializer = self.serialize)
+    def __init__(self, path, thread):
+        super().__init__(path, thread = thread, serializer = self.serialize)
         self.type_serializer = {}
     
     def serialize(self, obj):
@@ -17,8 +18,14 @@ class writer(_stream.ObjectWriter):
     
 class reader(_stream.ObjectReader):
 
-    def __init__(self, path):
-        super().__init__(path, deserializer = self.deserialize)
+    def __init__(self, path, thread, timeout_seconds = 5):
+
+        self.timeout_seconds = timeout_seconds
+
+        super().__init__(path, 
+                         thread = thread, 
+                         deserializer = self.deserialize)
+        
         self.type_deserializer = {}
     
         # def read():
@@ -33,6 +40,10 @@ class reader(_stream.ObjectReader):
 
         # self.read = functional.repeatedly(lambda: demux(utils.thread_id())[1])
 
+    def __call__(self):
+        return super().__call__(timeout_seconds = self.timeout_seconds,
+                       stacktrace = inspect.stack)
+    
     def deserialize(self, bytes):
         obj = pickle.loads(bytes)
 

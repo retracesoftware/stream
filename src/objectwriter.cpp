@@ -60,6 +60,7 @@ namespace retracesoftware_stream {
         size_t bytes_written;
         size_t messages_written;
         int next_handle;
+        PyThreadState * last_thread_state;
 
         // map<PyObject *, uint64_t> placeholders;
         // map<PyTypeObject *, retracesoftware::FastCall> type_serializers;
@@ -78,6 +79,8 @@ namespace retracesoftware_stream {
         // PyObject * fast_lookup[5];
         PyObject * serializer;
         PyObject * path;
+        retracesoftware::FastCall thread;
+
         vectorcallfunc vectorcall;
 
         static PyObject * StreamHandle_vectorcall(StreamHandle * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
@@ -89,6 +92,8 @@ namespace retracesoftware_stream {
                 return nullptr;
             }
             try {
+                writer->check_thread();
+
                 writer->write_handle_ref(self->index);
                 writer->messages_written++;
 
@@ -777,6 +782,8 @@ namespace retracesoftware_stream {
         // }
 
         void write_all(PyObject*const * args, size_t nargs) {
+            check_thread();
+
             for (size_t i = 0; i < nargs; i++) {
                 write(args[i]);
                 messages_written++;
@@ -793,7 +800,7 @@ namespace retracesoftware_stream {
                 PyErr_Format(PyExc_RuntimeError, "Cannot write to file: %S as its closed", self->path);
                 return nullptr;
             }
-            try {
+            try {                
                 size_t nargs = PyVectorcall_NARGS(nargsf);
 
                 if (self->file) {
@@ -945,16 +952,19 @@ namespace retracesoftware_stream {
 
             PyObject * path;
             PyObject * serializer;
+            PyObject * thread = nullptr;
 
-            static const char* kwlist[] = {"path", "serializer", nullptr};  // Keywords allowed
+            static const char* kwlist[] = {"path", "serializer", "thread", nullptr};  // Keywords allowed
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO", (char **)kwlist, &path, &serializer)) {
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|O", (char **)kwlist, &path, &serializer, &thread)) {
                 return -1;  
                 // Return NULL to propagate the parsing error
             }
 
             self->path = Py_NewRef(path);
             self->serializer = Py_NewRef(serializer);
+            self->thread = thread ? retracesoftware::FastCall(thread) : retracesoftware::FastCall();
+            Py_XINCREF(thread);
 
             self->bytes_written = self->messages_written = 0;
             // enumtype(enumtype);
@@ -965,12 +975,37 @@ namespace retracesoftware_stream {
 
             self->file = open(path, false);
             self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectWriter::py_vectorcall);
+            self->last_thread_state = PyThreadState_Get();
 
             return 0;
         }
 
+        void check_thread() {
+            PyThreadState * tstate = PyThreadState_Get();
+
+            if (thread.callable && last_thread_state != tstate) {
+                last_thread_state = tstate;
+
+                PyObject * thread_handle = PyDict_GetItem(PyThreadState_GetDict(), this);
+
+                if (!thread_handle) {
+                    PyObject * id = thread();
+                    if (!id) throw nullptr;
+                    
+                    thread_handle = handle(id);
+                    Py_DECREF(id);
+
+                    PyDict_SetItem(PyThreadState_GetDict(), this, thread_handle);
+                    Py_DECREF(thread_handle);
+                }
+                write(FixedSizeTypes::THREAD_SWITCH);
+                write(thread_handle);
+            }
+        }
+
         static int traverse(ObjectWriter* self, visitproc visit, void* arg) {
             // Py_VISIT(self->m_global_lookup);
+            Py_VISIT(self->thread.callable);
             Py_VISIT(self->path);
             Py_VISIT(self->serializer);
 
@@ -979,6 +1014,7 @@ namespace retracesoftware_stream {
 
         static int clear(ObjectWriter* self) {
             // Py_CLEAR(self->name_cache);
+            Py_CLEAR(self->thread.callable);
             Py_CLEAR(self->path);
             Py_CLEAR(self->serializer);
 
@@ -1109,6 +1145,7 @@ namespace retracesoftware_stream {
         .tp_itemsize = 0,
         .tp_dealloc = (destructor)ObjectWriter::dealloc,
         .tp_vectorcall_offset = OFFSET_OF_MEMBER(ObjectWriter, vectorcall),
+        .tp_hash = (hashfunc)_Py_HashPointer,
         .tp_call = PyVectorcall_Call,
         .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_VECTORCALL,
         .tp_doc = "TODO",

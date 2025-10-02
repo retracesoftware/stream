@@ -59,7 +59,7 @@ namespace retracesoftware_stream {
         // PLACEHOLDER,
         REF,
         INT64,
-
+        THREAD_SWITCH,
         // just a 64bit pointer
         // EXTREF, // holds the type
         // CACHE_LOOKUP,

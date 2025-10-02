@@ -9,6 +9,7 @@
 #include <tuple>
 
 #include "fastcall.h"
+#include "gilguard.h"
 
 #define MODULE "retracesoftware_stream."
 
