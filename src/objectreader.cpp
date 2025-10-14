@@ -726,8 +726,8 @@ namespace retracesoftware_stream {
                 }
                 return res;
             } catch (...) {
-                assert (PyErr_Occurred());
                 retracesoftware::GILGuard guard;
+                assert (PyErr_Occurred());
                 PyDict_DelItem(self->pending_reads, current_thread);
                 return nullptr;
             }
