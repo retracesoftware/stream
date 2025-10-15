@@ -19,6 +19,12 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Print commit and submodules
+        run: |
+          echo "repo: $(git rev-parse --short HEAD)" | tee -a $GITHUB_STEP_SUMMARY
+          git log -1 --pretty=oneline | tee -a $GITHUB_STEP_SUMMARY
+          git submodule status --recursive | tee -a $GITHUB_STEP_SUMMARY || true
+
       - name: Update submodules to latest remote
         run: |
           git submodule sync --recursive
@@ -66,6 +72,12 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+
+      - name: Print commit and submodules
+        run: |
+          echo "repo: $(git rev-parse --short HEAD)" | tee -a $GITHUB_STEP_SUMMARY
+          git log -1 --pretty=oneline | tee -a $GITHUB_STEP_SUMMARY
+          git submodule status --recursive | tee -a $GITHUB_STEP_SUMMARY || true
 
       - name: Update submodules to latest remote
         run: |
