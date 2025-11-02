@@ -14,6 +14,9 @@ class writer(_stream.ObjectWriter):
     
     def serialize(self, obj):
         # TODO, could add memoize one arg for performance
+        # s = self.type_serializer.get(type(obj), pickle.dumps)(obj)
+        # print(f'Serialized: {obj} to {s}')
+        # return s
         return self.type_serializer.get(type(obj), pickle.dumps)(obj)
     
 class reader(_stream.ObjectReader):

@@ -69,7 +69,10 @@ namespace retracesoftware_stream {
             case FixedSizeTypes::FALSE: return "FALSE";
             case FixedSizeTypes::NEW_HANDLE: return "NEW_HANDLE";
             case FixedSizeTypes::REF: return "REF";
+            case FixedSizeTypes::NEG1: return "NEG1";
             case FixedSizeTypes::INT64: return "INT64";
+            case FixedSizeTypes::BIND: return "BIND";
+
             // case FixedSizeTypes::PLACEHOLDER: return "PLACEHOLDER";
 
             // case FixedSizeTypes::EXTREF: return "EXTREF";
@@ -131,6 +134,9 @@ namespace retracesoftware_stream {
         std::mutex mtx;
         std::condition_variable wakeup;
         int next_control;
+        map<int, PyObject *> bindings;
+        PyObject * bind_singleton;
+        int binding_counter;
 
         int pid;
 
@@ -225,9 +231,19 @@ namespace retracesoftware_stream {
             return Py_NewRef(lookup[index]);
         }
 
-        size_t read_unsigned_number(uint8_t control) {
+        PyObject * read_binding(int64_t index) {
 
-            switch (control & 0xF0) {
+            assert(lookup.contains(index));
+
+            return Py_NewRef(bindings[index]);
+            // assert(index < next_handle);
+            // assert(lookup.contains(index));
+            // return Py_NewRef(lookup[index]);
+        }
+
+        size_t read_unsigned_number(Control control) {
+
+            switch (control.Sized.size) {
                 case ONE_BYTE_SIZE:
                     return (size_t)read_uint8();
                 case TWO_BYTE_SIZE:
@@ -237,7 +253,7 @@ namespace retracesoftware_stream {
                 case EIGHT_BYTE_SIZE:
                     return (size_t)read_uint64();
                 default:
-                    return (size_t)(control >> 4);
+                    return (size_t)(control.Sized.size);
             }
         }
 
@@ -374,14 +390,15 @@ namespace retracesoftware_stream {
             return Py_NewRef(dict.get());
         }
 
-        PyObject * read_sized(uint8_t control) {
+        PyObject * read_sized(Control control) {
 
             // assert ((control & 0xF) != SizedTypes::DEL);
             size_t size = read_unsigned_number(control);
 
-            switch (control & 0xF) {
+            switch (control.Sized.type) {
                 case SizedTypes::UINT: return PyLong_FromLongLong(size);
                 case SizedTypes::HANDLE: return read_handle(size);
+                case SizedTypes::BINDING: return read_binding(size);
 
                 case SizedTypes::BYTES: return read_bytes(size);
                 case SizedTypes::LIST: return read_list(size);
@@ -389,44 +406,45 @@ namespace retracesoftware_stream {
                 case SizedTypes::TUPLE: return read_tuple(size);
                 case SizedTypes::STR: return read_str(size);
                 case SizedTypes::PICKLED: return read_pickled(size);
+
+                case SizedTypes::BINDING_DELETE:
+                    raise(SIGTRAP);
+
                 default:
-                    PyErr_Format(PyExc_RuntimeError, "unknown sized type: %i", control & 0xF);
+                    PyErr_Format(PyExc_RuntimeError, "unknown sized type: %i", control.Sized.type);
                     throw nullptr;
             } 
         }
 
-        PyObject * read_fixedsize(uint8_t control) {
+        PyObject * read_fixedsize(FixedSizeTypes type) {
             assert (!PyErr_Occurred());
 
-            switch (control) {
+            switch (type) {
                 case FixedSizeTypes::NONE: return Py_NewRef(Py_None);
                 case FixedSizeTypes::TRUE: return Py_NewRef(Py_True);
                 case FixedSizeTypes::FALSE: return Py_NewRef(Py_False);
                 case FixedSizeTypes::NEG1: return PyLong_FromLong(-1);
+                // case FixedSizeTypes::BIND: return Py_NewRef(bind_singleton);
                 case FixedSizeTypes::FLOAT: return PyFloat_FromDouble(read_float());
                 case FixedSizeTypes::INT64: return PyLong_FromLongLong(read_int64());
                 // case FixedSizeTypes::INLINE_NEW_HANDLE: return Py_NewRef(store_handle());
                 default:
                     raise(SIGTRAP);
 
-                    const char * name = FixedSizeTypes_Name(static_cast<FixedSizeTypes>(control & 0xF));
+                    const char * name = FixedSizeTypes_Name(static_cast<FixedSizeTypes>(type));
 
                     if (name) {
                         PyErr_Format(PyExc_RuntimeError, "unhandled subtype: %s for FixedSized", name);
                     } else {
-                        PyErr_Format(PyExc_RuntimeError, "Unknown subtype: %i for FixedSized", control);
+                        PyErr_Format(PyExc_RuntimeError, "Unknown subtype: %i for FixedSized", type);
                     }
                     assert(PyErr_Occurred());
                     throw nullptr;
             };
         }
 
-        bool is_delete(uint8_t control) {
-            return (control & 0xF0) != FIXED_SIZE && (control & 0xF) == SizedTypes::DELETE;
-        }
-
-        int64_t read_sized_number(uint8_t control) {
-            switch (control & 0xF0) {
+        int64_t read_sized_number(Control control) {
+            switch (control.Sized.size) {
                 case ONE_BYTE_SIZE:
                     return (int64_t)read_int8();
                 case TWO_BYTE_SIZE:
@@ -436,7 +454,7 @@ namespace retracesoftware_stream {
                 case EIGHT_BYTE_SIZE:
                     return (int64_t)read_int64();
                 default:
-                    return (int64_t)((control >> 4) & 0x0F);
+                    return (int64_t)(control.Sized.size);
             }
         }
 
@@ -456,8 +474,8 @@ namespace retracesoftware_stream {
             return ref;
         }
 
-        bool consume(uint8_t control) {
-            if (is_delete(control)) {
+        bool consume(Control control) {
+            if (sized_type(control) == SizedTypes::DELETE) {
                 int64_t from_end = read_sized_number(control) + 1;
                 assert(from_end <= next_handle);
                 uint64_t offset = next_handle - from_end;
@@ -466,33 +484,48 @@ namespace retracesoftware_stream {
                 Py_DECREF(lookup[offset]);
                 lookup.erase(offset);
                 return true;
-            } else if ((control & 0xF0) == FIXED_SIZE && (control & 0xF) == FixedSizeTypes::NEW_HANDLE) {
+            } else if (fixed_size_type(control) == FixedSizeTypes::NEW_HANDLE) {
                 store_handle();
                 return true;
-            } else if ((control & 0xF0) == FIXED_SIZE && (control & 0xF) == FixedSizeTypes::THREAD_SWITCH) {
+            } else if (fixed_size_type(control) == FixedSizeTypes::THREAD_SWITCH) {
                 Py_XDECREF(active_thread);
                 active_thread = read();
+                return true;
+            } else if (sized_type(control) == SizedTypes::BINDING_DELETE) {
+                int64_t index = read_sized_number(control);
+                auto it = bindings.find(index);
+
+                if (it != bindings.end()) {
+                    Py_DECREF(it->second);
+                    bindings.erase(it);
+                }
                 return true;
             }
             return false;
         }
 
-        PyObject * read_root() {
-            uint8_t control = read_uint8();
-            
-            while (consume(control)) {
-                control = read_uint8();
-            }
-            return read(control);
+        Control read_control() {
+            Control c;
+            c.raw = read_uint8();
+            return c;
         }
 
-        PyObject * read(uint8_t control) {
-            return (control & 0xF0) == FIXED_SIZE
-                ? read_fixedsize(control & 0xF)
+        PyObject * read_root() {
+            Control control = read_control();
+            
+            while (consume(control)) {
+                control = read_control();
+            }
+            return fixed_size_type(control) == FixedSizeTypes::BIND ? bind_singleton : read(control);
+        }
+
+        PyObject * read(Control control) {
+            return control.Sized.type == SizedTypes::FIXED_SIZE
+                ? read_fixedsize(control.Fixed.type)
                 : read_sized(control);
         }
 
-        PyObject * read() { return read(read_uint8()); }
+        PyObject * read() { return read(read_control()); }
 
         // static PyObject * py_supply(ObjectReader *self, PyObject * target) {
         //     uint8_t control = self->next_control();
@@ -645,6 +678,108 @@ namespace retracesoftware_stream {
         //     return control;
         // }
 
+        PyObject* read_next(int timeout_seconds, PyObject * stacktrace) {
+            // should release the GIL first
+            PyObject * current_thread = PyObject_CallNoArgs(thread);
+            if (!current_thread) return nullptr;
+
+            PyDict_SetItem(pending_reads, current_thread, stacktrace);
+            Py_DECREF(current_thread);
+
+            retracesoftware::GILReleaseGuard guard;
+            // GIL is now released
+
+            std::unique_lock<std::mutex> lock(mtx);
+
+            try {
+                if (!next) {
+                    retracesoftware::GILGuard guard;
+                    next = read_root();
+                    wakeup.notify_all();
+                }
+
+                if (!equal(current_thread, active_thread)) {
+
+                    auto pred = [this, current_thread]() {
+                        retracesoftware::GILGuard guard;
+
+                        // ok we have the GIL
+                        if (stacktraces) {
+
+                            switch (PyDict_Contains(stacktraces, current_thread)) {
+                                case 0:
+                                    set_stacktrace(current_thread);
+                                    wakeup.notify_all();
+                                    break;
+                                case 1:
+                                    break;
+                                default:
+                                    throw nullptr;
+                            }
+                            return false;
+                        } else {
+                            if (!next) {
+                                next = read_root();
+                                wakeup.notify_all();
+                            }                    
+                            return equal(current_thread, active_thread);
+                        }
+                    };
+
+                    if (!wakeup.wait_for(lock, std::chrono::seconds(timeout_seconds), pred)) {
+                        on_thread_timeout(lock, current_thread);
+                    }
+                }
+
+                PyObject * res = next;
+                next = nullptr;
+                wakeup.notify_all();
+
+                messages_read++;
+                        
+                {
+                    retracesoftware::GILGuard guard;
+                    PyDict_DelItem(pending_reads, current_thread);
+                }
+                return res;
+            } catch (...) {
+                retracesoftware::GILGuard guard;
+                assert (PyErr_Occurred());
+                PyDict_DelItem(pending_reads, current_thread);
+                return nullptr;
+            }
+        }
+
+        static PyObject * py_bind(ObjectReader *self, PyObject* args, PyObject * kwds) {
+            PyObject * obj;
+            PyObject * stacktrace = Py_None;
+            int timeout_seconds = 5;
+
+            static const char* kwlist[] = {
+                "obj",
+                "timeout_seconds", 
+                "stacktrace", 
+                nullptr};  // Keywords allowed
+
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|IO", (char **)kwlist, 
+                &obj,
+                &timeout_seconds,
+                &stacktrace)) {
+                
+                return nullptr;
+            }
+
+            PyObject * res = self->read_next(timeout_seconds, stacktrace);
+
+            if (res == self->bind_singleton) {
+                self->bindings[self->binding_counter++] = Py_NewRef(obj);
+                Py_RETURN_NONE;
+            } else if (res) {
+                PyErr_Format(PyExc_TypeError, "Expected bind as next call but got: %S", res);
+                return nullptr;
+            }
+        }
+
         static PyObject* py_call(ObjectReader* self, PyObject* args, PyObject * kwds) {
 
             PyObject * stacktrace = Py_None;
@@ -662,74 +797,13 @@ namespace retracesoftware_stream {
                 return nullptr;
             }
 
-            // should release the GIL first
-            PyObject * current_thread = PyObject_CallNoArgs(self->thread);
-            if (!current_thread) return nullptr;
+            PyObject * res = self->read_next(timeout_seconds, stacktrace);
 
-            PyDict_SetItem(self->pending_reads, current_thread, stacktrace);
-            Py_DECREF(current_thread);
-
-            retracesoftware::GILReleaseGuard guard;
-            // GIL is now released
-
-            std::unique_lock<std::mutex> lock(self->mtx);
-
-            try {
-                if (!self->next) {
-                    retracesoftware::GILGuard guard;
-                    self->next = self->read_root();
-                    self->wakeup.notify_all();
-                }
-
-                if (!equal(current_thread, self->active_thread)) {
-
-                    auto pred = [self, current_thread]() {
-                        retracesoftware::GILGuard guard;
-
-                        // ok we have the GIL
-                        if (self->stacktraces) {
-
-                            switch (PyDict_Contains(self->stacktraces, current_thread)) {
-                                case 0:
-                                    self->set_stacktrace(current_thread);
-                                    self->wakeup.notify_all();
-                                    break;
-                                case 1:
-                                    break;
-                                default:
-                                    throw nullptr;
-                            }
-                            return false;
-                        } else {
-                            if (!self->next) {
-                                self->next = self->read_root();
-                                self->wakeup.notify_all();
-                            }                    
-                            return equal(current_thread, self->active_thread);
-                        }
-                    };
-
-                    if (!self->wakeup.wait_for(lock, std::chrono::seconds(timeout_seconds), pred)) {
-                        self->on_thread_timeout(lock, current_thread);
-                    }
-                }
-
-                PyObject * res = self->next;
-                self->next = nullptr;
-                self->wakeup.notify_all();
-
-                self->messages_read++;
-                        
-                {
-                    retracesoftware::GILGuard guard;
-                    PyDict_DelItem(self->pending_reads, current_thread);
-                }
-                return res;
-            } catch (...) {
-                retracesoftware::GILGuard guard;
-                assert (PyErr_Occurred());
-                PyDict_DelItem(self->pending_reads, current_thread);
+            if (res == self->bind_singleton) {
+                PyErr_Format(PyExc_TypeError, "Got unexpected bind as next call");
                 return nullptr;
+            } else {
+                return res;
             }
         }
 
@@ -773,6 +847,7 @@ namespace retracesoftware_stream {
                 self->thread = Py_XNewRef(thread);
                 self->path = Py_NewRef(path);
                 self->deserializer = Py_NewRef(deserializer);
+                self->bind_singleton = PyObject_New(PyObject, &PyBaseObject_Type);
                 self->bytes_read = self->messages_read = 0;
                 // enumtype(enumtype);
                 self->next_handle = 0;
@@ -782,11 +857,14 @@ namespace retracesoftware_stream {
                 self->pending_reads = PyDict_New();
                 self->stacktraces = nullptr;
                 self->next = nullptr;
-
+                
                 if (thread) {
                     self->active_thread = PyObject_CallNoArgs(thread);
                     if (!self->active_thread) return -1;
                 }
+
+                self->binding_counter = 0;
+                new (&self->bindings) map<int, PyObject *>();
 
                 self->file = open(path);
 
@@ -801,6 +879,7 @@ namespace retracesoftware_stream {
             Py_VISIT(self->thread);
             Py_VISIT(self->path);
             Py_VISIT(self->deserializer);
+            Py_VISIT(self->bind_singleton);
 
             for (const auto& [key, value] : self->lookup) {
                 Py_VISIT(value);
@@ -814,6 +893,7 @@ namespace retracesoftware_stream {
             Py_CLEAR(self->thread);
             Py_CLEAR(self->path);
             Py_CLEAR(self->deserializer);
+            Py_CLEAR(self->bind_singleton);
 
             for (const auto& [key, value] : self->lookup) {
                 Py_DECREF(value);
@@ -933,6 +1013,7 @@ namespace retracesoftware_stream {
     static PyMethodDef methods[] = {
         {"load_hash_secret", (PyCFunction)ObjectReader::py_load_hash_secret, METH_NOARGS, "TODO"},
         {"wake_pending", (PyCFunction)ObjectReader::py_wake_pending, METH_NOARGS, "TODO"},
+        {"bind", (PyCFunction)ObjectReader::py_bind, METH_VARARGS | METH_KEYWORDS, "TODO"},
 
         // {"dump_pending", (PyCFunction)ObjectReader::py_dump_pending, METH_O, "TODO"},
         // {"supply", (PyCFunction)ObjectReader::py_supply, METH_O, "supply the placeholder"},

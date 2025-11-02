@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 
 namespace retracesoftware_stream {
     // first bit encodes if its a sized type
@@ -27,8 +28,14 @@ namespace retracesoftware_stream {
         HANDLE,
         BIGINT,
         SET,
-        FROZENSET
+        FROZENSET,
+
+        BINDING,
+        BINDING_DELETE,
+        FIXED_SIZE,
+        SizedTypes__LAST__,
     };
+
 
     // 01111000 0x78
 
@@ -36,38 +43,77 @@ namespace retracesoftware_stream {
 
     // FIXEDSIZE = 0xF0
 
-    #define SIZE_MASK 0xF0
+    // #define SIZE_MASK 0xF0
 
-    #define ONE_BYTE_SIZE   (0x0B << 4)
-    #define TWO_BYTE_SIZE   (0x0C << 4)
-    #define FOUR_BYTE_SIZE  (0x0D << 4)
-    #define EIGHT_BYTE_SIZE (0x0E << 4)
-    #define FIXED_SIZE      (0x0F << 4)
+    enum Sizes : uint8_t {
+        ONE_BYTE_SIZE = 12,
+        TWO_BYTE_SIZE,
+        FOUR_BYTE_SIZE,
+        EIGHT_BYTE_SIZE,
+    };
+
+    // #define ONE_BYTE_SIZE   (0x0B << 4)
+    // #define TWO_BYTE_SIZE   (0x0C << 4)
+    // #define FOUR_BYTE_SIZE  (0x0D << 4)
+    // #define EIGHT_BYTE_SIZE (0x0E << 4)
+    // #define FIXED_SIZE      (0x0F << 4)
 
     // #define IS_ROOT_TYPE 0x06
 
     enum FixedSizeTypes : uint8_t {
         NONE,
-        // C_NULL,
         TRUE,
         FALSE,
         FLOAT,
+
         NEG1,
-        // GLOBAL,
-        NEW_HANDLE,
-        // INLINE_NEW_HANDLE,
-        // PLACEHOLDER,
-        REF,
         INT64,
+
+        NEW_HANDLE,
+        REF,
         THREAD_SWITCH,
-        // just a 64bit pointer
-        // EXTREF, // holds the type
-        // CACHE_LOOKUP,
-        // CACHE_ADD,
-    
-        // METHOD_DESCRIPTOR,
+        BIND,
+
         FixedSizeTypes__LAST__, // 11
     };
+
+    union Control {
+        struct {
+            SizedTypes type : 4;  // Lower 4 bits
+            Sizes size : 4; // Upper 4 bits
+        } Sized;
+        struct {
+            SizedTypes SizedTypes_FIXED_SIZE : 4;  // Lower 4 bits
+            FixedSizeTypes type : 4; // Upper 4 bits
+        } Fixed;
+        uint8_t raw;
+    };
+
+    static bool is_fixedsize(Control control) {
+        return control.Fixed.SizedTypes_FIXED_SIZE == FIXED_SIZE;
+    }
+
+    static SizedTypes sized_type(Control control) {
+        return control.Sized.type != FIXED_SIZE ? control.Sized.type : SizedTypes__LAST__;
+    }
+
+    static Control create_fixed_size(FixedSizeTypes type) {
+        Control c;
+        c.Fixed.type = type;
+        c.Fixed.SizedTypes_FIXED_SIZE = FIXED_SIZE;
+        return c;
+    }
+    
+    static FixedSizeTypes fixed_size_type(Control control) {
+        return control.Fixed.SizedTypes_FIXED_SIZE == FIXED_SIZE ? control.Fixed.type : FixedSizeTypes__LAST__;
+    }
+
+    inline Control CreateFixedSize(FixedSizeTypes type) {
+        Control control;
+        control.Fixed.SizedTypes_FIXED_SIZE = SizedTypes::FIXED_SIZE;
+        control.Fixed.type = type;
+        return control;
+    }
 
     // enum RootTypes : uint8_t {
     //     UNUSED,

@@ -5,10 +5,71 @@
 #include <fcntl.h>
 #include <sstream>
 #include <sys/file.h>
-// #include "unordered_dense.h"
-// using namespace ankerl::unordered_dense;
+
+#include <vector>
+#include <algorithm> 
+#include "unordered_dense.h"
+
+using namespace ankerl::unordered_dense;
 
 namespace retracesoftware_stream {
+
+    struct ObjectWriter;
+
+    static std::vector<ObjectWriter *> writers;
+    static map<PyTypeObject *, freefunc> freefuncs;
+
+    static void on_free(void * obj);
+
+    static void generic_free(void * obj) {
+        auto it = freefuncs.find(Py_TYPE(obj));
+        if (it != freefuncs.end()) {
+            on_free(obj);
+            it->second(obj);
+        } else {
+            // bad situation, a memory leak! Maybe print a bad warning
+        }
+    }
+
+    static void PyObject_GC_Del_Wrapper(void * obj) {
+        on_free(obj);
+        PyObject_GC_Del(obj);
+    }
+
+    static void PyObject_Free_Wrapper(void * obj) {
+        on_free(obj);
+        PyObject_Free(obj);
+    }
+
+    static bool is_patched(freefunc func) {
+        return func == generic_free || 
+               func == PyObject_GC_Del_Wrapper ||
+               func == PyObject_Free_Wrapper;
+    }
+
+    static void patch_free(PyTypeObject * cls) {
+        assert(!is_patched(cls->tp_free));
+        if (cls->tp_free == PyObject_Free) {
+            cls->tp_free = PyObject_Free_Wrapper;
+        } else if (cls->tp_free == PyObject_GC_Del) {
+            cls->tp_free = PyObject_GC_Del_Wrapper;
+        } else {
+            freefuncs[cls] = cls->tp_free;
+            cls->tp_free = generic_free;
+        }
+    }
+
+    // static void patch_dealloc(PyTypeObject * cls) {
+    //     assert(!is_patched(cls->tp_dealloc));
+    //     if (cls->tp_free == PyObject_Free) {
+    //         cls->tp_free = PyObject_Free_Wrapper;
+    //     } else if (cls->tp_free == PyObject_GC_Del) {
+    //         cls->tp_free = PyObject_GC_Del_Wrapper;
+    //     } else {
+    //         freefuncs[cls] = cls->tp_free;
+    //         cls->tp_free = generic_free;
+    //     }
+    // }
 
     struct StreamHandle : public PyObject {
         int index;
@@ -61,6 +122,8 @@ namespace retracesoftware_stream {
         size_t messages_written;
         int next_handle;
         PyThreadState * last_thread_state;
+        map<PyObject *, int> bindings;
+        int binding_counter;
 
         // map<PyObject *, uint64_t> placeholders;
         // map<PyTypeObject *, retracesoftware::FastCall> type_serializers;
@@ -109,6 +172,22 @@ namespace retracesoftware_stream {
             } catch (...) {
                 return nullptr;
             }
+        }
+
+        void bind(PyObject * obj) {
+            check_thread();
+
+            if (bindings.contains(obj)) {
+                PyErr_Format(PyExc_RuntimeError, "object: %S already bound", obj);
+                throw nullptr;
+            }
+
+            if (!is_patched(Py_TYPE(obj)->tp_free)) {
+                patch_free(Py_TYPE(obj));
+            }
+            bindings[obj] = binding_counter++;
+
+            write(FixedSizeTypes::BIND);
         }
 
         void write_delete(int id) {
@@ -493,10 +572,12 @@ namespace retracesoftware_stream {
             }
         }
 
-        inline void write(FixedSizeTypes obj) {
-            uint8_t control = (uint8_t)obj | FIXED_SIZE;
+        inline void write(Control control) {
+            write(control.raw);
+        }
 
-            write(control);
+        inline void write(FixedSizeTypes obj) {
+            write(create_fixed_size(obj));
         }
 
         inline void write(const uint8_t * bytes, Py_ssize_t size) {
@@ -577,27 +658,39 @@ namespace retracesoftware_stream {
             write(*(uint64_t *)&d);
         }
 
-        void write_control(uint8_t value) {
-            write(value);
+        void write_control(Control value) {
+            write(value.raw);
         }
+
+        // void write_control(uint8_t value) {
+        //     write(value);
+        // }
 
         void write_size(SizedTypes type, Py_ssize_t size) {
             assert (type < 16);
 
-            if (size < 11) {
-                write_control(type | (size << 4));
+            Control control;
+            control.Sized.type = type;
+
+            if (size <= 11) {
+                control.Sized.size = (Sizes)size;
+                write_control(control);
             } else {
                 if (size < UINT8_MAX) {
-                    write_control(type | ONE_BYTE_SIZE);
+                    control.Sized.size = Sizes::ONE_BYTE_SIZE;
+                    write_control(control);
                     write((int8_t)size);
                 } else if (size < UINT16_MAX) { 
-                    write_control(type | TWO_BYTE_SIZE);
+                    control.Sized.size = Sizes::TWO_BYTE_SIZE;
+                    write_control(control);
                     write((int16_t)size);
                 } else if (size < UINT32_MAX) { 
-                    write_control(type | FOUR_BYTE_SIZE);
+                    control.Sized.size = Sizes::FOUR_BYTE_SIZE;
+                    write_control(control);
                     write((int32_t)size);
                 } else {
-                    write_control(type | EIGHT_BYTE_SIZE);
+                    control.Sized.size = Sizes::EIGHT_BYTE_SIZE;
+                    write_control(control);
                     write((int64_t)size);
                 }
             }
@@ -622,36 +715,18 @@ namespace retracesoftware_stream {
         //     write(bytes_written);
         // }
 
-        void write_unsigned_number(SizedTypes typ, uint64_t l) {
-            if (l < 11) {
-                write_control(typ | (l << 4));
-            }
-            else if (l <= UINT8_MAX) {
-                write_control(ONE_BYTE_SIZE | typ);
-                write((uint8_t)l);
-            }
-            else if (l <= UINT16_MAX) {
-                write_control(TWO_BYTE_SIZE | typ);
-                write((uint16_t)l);
-            }
-            else if (l <= UINT32_MAX) {
-                write_control(FOUR_BYTE_SIZE | typ);
-                write((uint32_t)l);
-            }
-            else {
-                write_control(EIGHT_BYTE_SIZE | typ);
-                write(l);
-            }
+        void write_unsigned_number(SizedTypes type, uint64_t l) {
+            write_size(type, l);
         }
 
         void write_sized_int(int64_t l) {
-            if (l == -1) {
-                write_control(FIXED_SIZE | FixedSizeTypes::NEG1);
-            } else if (l < -1 || l > INT32_MAX) {
-                write_control(FIXED_SIZE | FixedSizeTypes::INT64);
-                write(l);
-            } else {
+            if (l >= 0) {
                 write_unsigned_number(SizedTypes::UINT, l);
+            } else if (l == -1) {
+                write_control(CreateFixedSize(FixedSizeTypes::NEG1));
+            } else {
+                write_control(CreateFixedSize(FixedSizeTypes::INT64));
+                write(l);
             }
         }
 
@@ -697,8 +772,24 @@ namespace retracesoftware_stream {
         //     return false;
         // }
 
-        void write(PyObject * obj) {
+        void write_lookup(int ref) {
+            write_unsigned_number(SizedTypes::BINDING, ref);   
+        }
 
+        void write(PyObject * obj) {
+            
+            // {
+            //     PyObject * s = PyObject_Str(obj);
+            //     if (s) {
+            //         printf("C++ write: %s\n", PyUnicode_AsUTF8(s));
+            //         Py_DECREF(s);
+            //     } else {
+            //         PyErr_Clear();
+            //         printf("C++ write type: %s\n", Py_TYPE(obj)->tp_name);
+            //     }
+            // }
+            
+            assert(obj);
             // if (obj == nullptr) write(FixedSizeTypes::C_NULL);
 
             if (obj == Py_None) write(FixedSizeTypes::NONE);
@@ -729,6 +820,9 @@ namespace retracesoftware_stream {
             else if (Py_TYPE(obj) == &PyTuple_Type) write_tuple(obj);
             else if (Py_TYPE(obj) == &PyList_Type) write_list(obj);
             else if (Py_TYPE(obj) == &PyDict_Type) write_dict(obj);
+
+            else if (bindings.contains(obj)) write_lookup(bindings[obj]);
+
             // else if (Py_TYPE(obj) == &GlobalRef_Type) write_global_ref(obj);
             // else if (Py_TYPE(obj) == &PyType_Type) ;
             // else if (Py_TYPE(obj) == &Pickled_Type) write_pickled(obj);
@@ -738,6 +832,7 @@ namespace retracesoftware_stream {
 
             else if (Py_TYPE(obj) == &PyMemoryView_Type) write_memory_view(obj);
             else if (Py_TYPE(obj) == &StreamHandle_Type) write_stream_handle(obj);
+
 
             // else if (type_serializers.contains(Py_TYPE(obj))) {
             //     PyObject * res = type_serializers[Py_TYPE(obj)](obj);
@@ -925,6 +1020,15 @@ namespace retracesoftware_stream {
             }
         }
 
+        static PyObject * py_bind(ObjectWriter * self, PyObject* obj) {
+            try {
+                self->bind(obj);
+                Py_RETURN_NONE;
+            } catch (...) {
+                return nullptr;
+            }
+        }
+
         // static PyObject * py_add_type_serializer(ObjectWriter * self, PyObject* args, PyObject* kwds) {
         //     PyTypeObject * cls;
         //     PyObject * serializer;
@@ -976,6 +1080,10 @@ namespace retracesoftware_stream {
             self->file = open(path, false);
             self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectWriter::py_vectorcall);
             self->last_thread_state = PyThreadState_Get();
+            self->binding_counter = 0;
+            new (&self->bindings) map<PyObject *, int>();
+
+            writers.push_back(self);
 
             return 0;
         }
@@ -1031,6 +1139,22 @@ namespace retracesoftware_stream {
             clear(self);
 
             Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
+
+            auto it = std::find(writers.begin(), writers.end(), self);
+            if (it != writers.end()) {
+                writers.erase(it);
+            }
+        }
+
+        void object_freed(PyObject * obj) {
+            auto it = bindings.find(obj);
+
+            // is there an integer binding for this?
+            if (it != bindings.end()) {
+                check_thread();
+                write_unsigned_number(SizedTypes::BINDING_DELETE, it->second);
+                bindings.erase(it);
+            }
         }
 
         static PyObject * path_getter(ObjectWriter *self, void *closure) {
@@ -1079,6 +1203,12 @@ namespace retracesoftware_stream {
         }
     };
 
+    static void on_free(void * obj) {
+        for (ObjectWriter * writer : writers) {
+            writer->object_freed((PyObject *)obj);
+        }
+    }
+
     // PyTypeObject WeakRefCallback_Type = {
     //     .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
     //     .tp_name = MODULE "WeakRefCallback",
@@ -1093,6 +1223,11 @@ namespace retracesoftware_stream {
     //     .tp_clear = (inquiry)WeakRefCallback::clear,
     // };
 
+    PyMemberDef StreamHandle_members[] = {
+        {"index", T_ULONGLONG, OFFSET_OF_MEMBER(StreamHandle, index), READONLY, "TODO"},
+        {NULL}
+    };
+
     PyTypeObject StreamHandle_Type = {
         .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
         .tp_name = MODULE "StreamHandle",
@@ -1105,6 +1240,7 @@ namespace retracesoftware_stream {
         .tp_doc = "TODO",
         .tp_traverse = (traverseproc)StreamHandle::traverse,
         .tp_clear = (inquiry)StreamHandle::clear,
+        .tp_members = StreamHandle_members,
     };
 
     static PyMethodDef methods[] = {
@@ -1115,6 +1251,7 @@ namespace retracesoftware_stream {
         {"flush", (PyCFunction)ObjectWriter::py_flush, METH_NOARGS, "TODO"},
         {"close", (PyCFunction)ObjectWriter::py_close, METH_NOARGS, "TODO"},
         {"reopen", (PyCFunction)ObjectWriter::py_reopen, METH_NOARGS, "TODO"},
+        {"bind", (PyCFunction)ObjectWriter::py_bind, METH_O, "TODO"},
         {"store_hash_secret", (PyCFunction)ObjectWriter::py_store_hash_secret, METH_NOARGS, "TODO"},
         // {"unique", (PyCFunction)ObjectWriter::py_unique, METH_O, "TODO"},
         // {"delete", (PyCFunction)ObjectWriter::py_delete, METH_O, "TODO"},
