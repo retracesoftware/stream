@@ -71,8 +71,10 @@ namespace retracesoftware_stream {
 
         NEW_HANDLE,
         REF,
+        
         THREAD_SWITCH,
         BIND,
+        EXT_BIND,
 
         FixedSizeTypes__LAST__, // 11
     };

@@ -174,7 +174,7 @@ namespace retracesoftware_stream {
             }
         }
 
-        void bind(PyObject * obj) {
+        void bind(PyObject * obj, bool ext) {
             check_thread();
 
             if (bindings.contains(obj)) {
@@ -187,7 +187,17 @@ namespace retracesoftware_stream {
             }
             bindings[obj] = binding_counter++;
 
-            write(FixedSizeTypes::BIND);
+            if (ext) {
+                if (!bindings.contains((PyObject *)Py_TYPE(obj))) {
+                    PyErr_Format(PyExc_RuntimeError, "to externally bind object: %S, object type: %S must have been bound", obj, Py_TYPE(obj));
+                    throw nullptr;
+                }
+                write(FixedSizeTypes::EXT_BIND);
+                write_lookup(bindings[(PyObject *)Py_TYPE(obj)]);
+
+            } else {
+                write(FixedSizeTypes::BIND);
+            }
         }
 
         void write_delete(int id) {
@@ -1022,7 +1032,16 @@ namespace retracesoftware_stream {
 
         static PyObject * py_bind(ObjectWriter * self, PyObject* obj) {
             try {
-                self->bind(obj);
+                self->bind(obj, false);
+                Py_RETURN_NONE;
+            } catch (...) {
+                return nullptr;
+            }
+        }
+
+        static PyObject * py_ext_bind(ObjectWriter * self, PyObject* obj) {
+            try {
+                self->bind(obj, true);
                 Py_RETURN_NONE;
             } catch (...) {
                 return nullptr;
@@ -1252,6 +1271,7 @@ namespace retracesoftware_stream {
         {"close", (PyCFunction)ObjectWriter::py_close, METH_NOARGS, "TODO"},
         {"reopen", (PyCFunction)ObjectWriter::py_reopen, METH_NOARGS, "TODO"},
         {"bind", (PyCFunction)ObjectWriter::py_bind, METH_O, "TODO"},
+        {"ext_bind", (PyCFunction)ObjectWriter::py_ext_bind, METH_O, "TODO"},
         {"store_hash_secret", (PyCFunction)ObjectWriter::py_store_hash_secret, METH_NOARGS, "TODO"},
         // {"unique", (PyCFunction)ObjectWriter::py_unique, METH_O, "TODO"},
         // {"delete", (PyCFunction)ObjectWriter::py_delete, METH_O, "TODO"},

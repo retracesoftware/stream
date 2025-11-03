@@ -72,6 +72,7 @@ namespace retracesoftware_stream {
             case FixedSizeTypes::NEG1: return "NEG1";
             case FixedSizeTypes::INT64: return "INT64";
             case FixedSizeTypes::BIND: return "BIND";
+            case FixedSizeTypes::EXT_BIND: return "EXT_BIND";
 
             // case FixedSizeTypes::PLACEHOLDER: return "PLACEHOLDER";
 
@@ -483,6 +484,15 @@ namespace retracesoftware_stream {
                 assert(lookup.contains(offset));
                 Py_DECREF(lookup[offset]);
                 lookup.erase(offset);
+                return true;
+            } else if (fixed_size_type(control) == FixedSizeTypes::EXT_BIND) {
+                PyObject * cls = read();
+                
+                PyObject * instance = PyObject_CallNoArgs(cls);
+                if (!instance) {
+                    throw nullptr;
+                }
+                bindings[binding_counter++] = instance;
                 return true;
             } else if (fixed_size_type(control) == FixedSizeTypes::NEW_HANDLE) {
                 store_handle();
