@@ -234,8 +234,7 @@ namespace retracesoftware_stream {
 
         PyObject * read_binding(int64_t index) {
 
-            assert(lookup.contains(index));
-
+            assert(bindings.contains(index));
             return Py_NewRef(bindings[index]);
             // assert(index < next_handle);
             // assert(lookup.contains(index));
@@ -486,9 +485,20 @@ namespace retracesoftware_stream {
                 lookup.erase(offset);
                 return true;
             } else if (fixed_size_type(control) == FixedSizeTypes::EXT_BIND) {
-                PyObject * cls = read();
+                PyTypeObject * cls = (PyTypeObject *)read();
                 
-                PyObject * instance = PyObject_CallNoArgs(cls);
+                if (!PyType_Check((PyObject *)cls)) {
+                    PyErr_Format(PyExc_TypeError, "Expected next item read to be a type but was: %S", cls);
+                    throw nullptr;
+                }
+                PyObject * empty = PyTuple_New(0);
+
+                PyObject * instance = cls->tp_new(cls, empty, nullptr);
+
+                Py_DECREF(empty);
+                Py_DECREF(cls);
+
+                // PyObject * instance = PyObject_CallNoArgs(cls);
                 if (!instance) {
                     throw nullptr;
                 }
