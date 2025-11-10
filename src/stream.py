@@ -8,8 +8,8 @@ import inspect
 
 class writer(_stream.ObjectWriter):
 
-    def __init__(self, path, thread):
-        super().__init__(path, thread = thread, serializer = self.serialize)
+    def __init__(self, path, thread, verbose = False):
+        super().__init__(path, thread = thread, serializer = self.serialize, verbose = verbose)
         self.type_serializer = {}
     
     def serialize(self, obj):
@@ -21,28 +21,17 @@ class writer(_stream.ObjectWriter):
     
 class reader(_stream.ObjectReader):
 
-    def __init__(self, path, thread, timeout_seconds = 5):
+    def __init__(self, path, thread, timeout_seconds = 5, verbose = False):
 
         self.timeout_seconds = timeout_seconds
 
         super().__init__(path, 
                          thread = thread, 
-                         deserializer = self.deserialize)
+                         deserializer = self.deserialize,
+                         verbose = verbose)
         
         self.type_deserializer = {}
     
-        # def read():
-        #     current = None
-        #     obj = self.impl()
-        #     while isinstance(obj, ThreadSwitch):
-        #         current = obj.id
-        #         obj = self.impl()
-        #     return (current, obj)
-        
-        # demux = utils.demux(source = read, key_function = lambda obj: obj[0])
-
-        # self.read = functional.repeatedly(lambda: demux(utils.thread_id())[1])
-
     def __call__(self):
         return super().__call__(timeout_seconds = self.timeout_seconds,
                        stacktrace = inspect.stack)

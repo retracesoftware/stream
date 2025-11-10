@@ -61,6 +61,31 @@ namespace retracesoftware_stream {
         const size_t target_size_;  // The target size (N)
     };
 
+    const char * SizedTypes_Name(enum SizedTypes root) {
+        switch (root) {
+            case SizedTypes::BYTES: return "BYTES";
+            case SizedTypes::LIST: return "LIST";
+            case SizedTypes::DICT: return "DICT";
+            case SizedTypes::TUPLE: return "TUPLE";
+
+            case SizedTypes::STR: return "STR";
+            case SizedTypes::PICKLED: return "PICKLED";
+            case SizedTypes::UINT: return "UINT";
+            case SizedTypes::DELETE: return "DELETE";
+            
+            case SizedTypes::HANDLE: return "HANDLE";
+            case SizedTypes::BIGINT: return "BIGINT";
+            case SizedTypes::SET: return "SET";
+            case SizedTypes::FROZENSET: return "FROZENSET";
+
+            case SizedTypes::BINDING: return "BINDING";
+            case SizedTypes::BINDING_DELETE: return "BINDING_DELETE";
+            case SizedTypes::FIXED_SIZE: return "FIXED_SIZE";
+
+            default: return nullptr;
+        }
+    }
+
     const char * FixedSizeTypes_Name(enum FixedSizeTypes root) {
         switch (root) {
             case FixedSizeTypes::NONE: return "NONE";
@@ -155,7 +180,7 @@ namespace retracesoftware_stream {
         PyObject * stacktraces;
 
         PyObject * next;
-
+        bool verbose;
         // map<PyObject *, PyObject *> pending_reads;
         
         void read(uint8_t * bytes, Py_ssize_t size) {
@@ -395,11 +420,15 @@ namespace retracesoftware_stream {
             // assert ((control & 0xF) != SizedTypes::DEL);
             size_t size = read_unsigned_number(control);
 
-            switch (control.Sized.type) {
-                case SizedTypes::UINT: return PyLong_FromLongLong(size);
-                case SizedTypes::HANDLE: return read_handle(size);
-                case SizedTypes::BINDING: return read_binding(size);
+            if (verbose) printf("%s ", SizedTypes_Name(control.Sized.type));
 
+            switch (control.Sized.type) {
+                case SizedTypes::UINT: 
+                    return PyLong_FromLongLong(size);
+                case SizedTypes::HANDLE: 
+                    return read_handle(size);
+                case SizedTypes::BINDING: 
+                    return read_binding(size);
                 case SizedTypes::BYTES: return read_bytes(size);
                 case SizedTypes::LIST: return read_list(size);
                 case SizedTypes::DICT: return read_dict(size);
@@ -419,14 +448,22 @@ namespace retracesoftware_stream {
         PyObject * read_fixedsize(FixedSizeTypes type) {
             assert (!PyErr_Occurred());
 
+            if (verbose) printf("%s ", FixedSizeTypes_Name(type));
+
             switch (type) {
-                case FixedSizeTypes::NONE: return Py_NewRef(Py_None);
-                case FixedSizeTypes::TRUE: return Py_NewRef(Py_True);
-                case FixedSizeTypes::FALSE: return Py_NewRef(Py_False);
-                case FixedSizeTypes::NEG1: return PyLong_FromLong(-1);
+                case FixedSizeTypes::NONE: 
+                    return Py_NewRef(Py_None);
+                case FixedSizeTypes::TRUE:
+                    return Py_NewRef(Py_True);
+                case FixedSizeTypes::FALSE: 
+                    return Py_NewRef(Py_False);
+                case FixedSizeTypes::NEG1: 
+                    return PyLong_FromLong(-1);
                 // case FixedSizeTypes::BIND: return Py_NewRef(bind_singleton);
-                case FixedSizeTypes::FLOAT: return PyFloat_FromDouble(read_float());
-                case FixedSizeTypes::INT64: return PyLong_FromLongLong(read_int64());
+                case FixedSizeTypes::FLOAT:
+                    return PyFloat_FromDouble(read_float());
+                case FixedSizeTypes::INT64:
+                    return PyLong_FromLongLong(read_int64());
                 // case FixedSizeTypes::INLINE_NEW_HANDLE: return Py_NewRef(store_handle());
                 default:
                     raise(SIGTRAP);
@@ -476,6 +513,8 @@ namespace retracesoftware_stream {
 
         bool consume(Control control) {
             if (sized_type(control) == SizedTypes::DELETE) {
+                if (verbose) printf("consumed DELETE\n");
+
                 int64_t from_end = read_sized_number(control) + 1;
                 assert(from_end <= next_handle);
                 uint64_t offset = next_handle - from_end;
@@ -485,6 +524,8 @@ namespace retracesoftware_stream {
                 lookup.erase(offset);
                 return true;
             } else if (fixed_size_type(control) == FixedSizeTypes::EXT_BIND) {
+                if (verbose) printf("consumed EXT_BIND\n");
+
                 PyTypeObject * cls = (PyTypeObject *)read();
                 
                 if (!PyType_Check((PyObject *)cls)) {
@@ -505,13 +546,25 @@ namespace retracesoftware_stream {
                 bindings[binding_counter++] = instance;
                 return true;
             } else if (fixed_size_type(control) == FixedSizeTypes::NEW_HANDLE) {
+                if (verbose) printf("consumed NEW_HANDLE\n");
+
                 store_handle();
                 return true;
             } else if (fixed_size_type(control) == FixedSizeTypes::THREAD_SWITCH) {
+                if (verbose) printf("consumed THREAD_SWITCH\n");
+
                 Py_XDECREF(active_thread);
                 active_thread = read();
+
+                if (verbose) {
+                    PyObject * str = PyObject_Str(active_thread);
+                    if (verbose) printf("consumed THREAD_SWITCH %s\n", PyUnicode_AsUTF8(str));
+                    Py_DECREF(str);
+                }
                 return true;
             } else if (sized_type(control) == SizedTypes::BINDING_DELETE) {
+                if (verbose) printf("consumed BINDING_DELETE\n");
+
                 int64_t index = read_sized_number(control);
                 auto it = bindings.find(index);
 
@@ -536,7 +589,17 @@ namespace retracesoftware_stream {
             while (consume(control)) {
                 control = read_control();
             }
-            return fixed_size_type(control) == FixedSizeTypes::BIND ? bind_singleton : read(control);
+            PyObject * res = fixed_size_type(control) == FixedSizeTypes::BIND ? bind_singleton : read(control);
+
+            if (verbose) {
+                PyObject * str = PyObject_Str(res);
+                if (!str) {
+                    raise(SIGTRAP);
+                }
+                printf("root: %s\n", PyUnicode_AsUTF8(str));
+                Py_DECREF(str);
+            }
+            return res;
         }
 
         PyObject * read(Control control) {
@@ -545,51 +608,9 @@ namespace retracesoftware_stream {
                 : read_sized(control);
         }
 
-        PyObject * read() { return read(read_control()); }
-
-        // static PyObject * py_supply(ObjectReader *self, PyObject * target) {
-        //     uint8_t control = self->next_control();
-
-        //     if (control != (0xF0 | FixedSizeTypes::PLACEHOLDER)) {
-        //         PyErr_Format(PyExc_RuntimeError, "Expected next element to be a PLACEHOLDER but was...");
-        //         return nullptr;
-        //     }
-        //     self->lookup[self->next_handle++] = Py_NewRef(target);
-        //     return Py_NewRef(target);
-        // }
-
-        // void on_timeout(std::unique_lock<std::mutex> &lock, PyObject * current_thread) {
-        //     if (stacktrace) {
-        //         PyObject * stack = PyObject_CallNoArgs(stacktrace);
-        //         if (!stack) throw nullptr;
-
-        //         if (timed_out) {
-        //             PyDict_SetItem(timed_out, current_thread, stack);
-        //             Py_DECREF(stack);
-        //             wakeup.notify_all();
-        //             while(true) wakeup.wait(lock);
-                    
-        //         } else {
-        //             timed_out = PyDict_New();
-        //             PyDict_SetItem(timed_out, current_thread, stack);
-
-        //             wakeup.notify_all();
-
-        //             int total = pending_reads.size();
-
-        //             wakeup.wait(lock, [this, total]() {
-        //                 return PyDict_Size(timed_out) == total;
-        //             });
-
-        //             if (on_timeout_callback) {
-        //                 PyObject_CallFunctionObjArgs(on_timeout_callback, this, timed_out, nullptr);
-        //             }
-        //             raise(SIGTRAP);
-        //         }
-        //     } else {
-        //         raise(SIGTRAP);
-        //     }
-        // }
+        PyObject * read() { 
+            return read(read_control());
+        }
 
         static void raise_timeout(PyObject * pending) {
             // 1. Create the custom data object (a tuple containing the duration and code)
@@ -851,16 +872,17 @@ namespace retracesoftware_stream {
                 PyObject * deserializer;
                 PyObject * transform = nullptr;
                 PyObject * thread = nullptr;
-
+                int verbose = 0;
                 static const char* kwlist[] = {
                     "path", 
                     "deserializer", 
                     "transform", 
                     "thread",
+                    "verbose",
                     nullptr};  // Keywords allowed
 
-                if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OO", (char **)kwlist, &path, &deserializer, &transform, &thread)) {
-                    return -1;  
+                if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OOp", (char **)kwlist, &path, &deserializer, &transform, &thread, &verbose)) {
+                    return -1;
                     // Return NULL to propagate the parsing error
                 }
 
@@ -872,6 +894,7 @@ namespace retracesoftware_stream {
                 // enumtype(enumtype);
                 self->next_handle = 0;
                 self->transform = transform != Py_None ? Py_XNewRef(transform) : nullptr;
+                self->verbose = verbose;
 
                 // self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectReader::py_vectorcall);
                 self->pending_reads = PyDict_New();
@@ -1054,6 +1077,7 @@ namespace retracesoftware_stream {
         {"messages_read", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectReader, messages_read), READONLY, "TODO"},
         {"stacktraces", T_OBJECT, OFFSET_OF_MEMBER(ObjectReader, stacktraces), READONLY, "TODO"},
         {"active_thread", T_OBJECT, OFFSET_OF_MEMBER(ObjectReader, active_thread), READONLY, "TODO"},
+        {"verbose", T_BOOL, OFFSET_OF_MEMBER(ObjectReader, verbose), 0, "TODO"},
         // {"pending_reads", T_OBJECT, OFFSET_OF_MEMBER(ObjectReader, pending_reads), READONLY, "TODO"},
         // {"path", T_OBJECT, OFFSET_OF_MEMBER(Writer, path), READONLY, "TODO"},
         // {"on_pid_change", T_OBJECT_EX, OFFSET_OF_MEMBER(Writer, on_pid_change), 0, "TODO"},

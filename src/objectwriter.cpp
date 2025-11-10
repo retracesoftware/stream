@@ -131,6 +131,7 @@ namespace retracesoftware_stream {
         // PyTypeObject * enumtype;
 
         int pid;
+        bool verbose;
 
         // 1. add a type serializer for target type
         // 2. tests the intern value for resultant type serializer
@@ -164,6 +165,11 @@ namespace retracesoftware_stream {
 
                 for (size_t i = 0; i < total_args; i++) {
                     writer->write(args[i]);
+                    if (writer->verbose) {
+                        PyObject * str = PyObject_Str(args[i]);
+                        printf("written: %s\n", PyUnicode_AsUTF8(str));
+                        Py_DECREF(str);
+                    }
                     writer->messages_written++;
                 }
 
@@ -891,6 +897,11 @@ namespace retracesoftware_stream {
 
             for (size_t i = 0; i < nargs; i++) {
                 write(args[i]);
+                if (verbose) {
+                    PyObject * str = PyObject_Str(args[i]);
+                    printf("written: %s\n", PyUnicode_AsUTF8(str));
+                    Py_DECREF(str);
+                }
                 messages_written++;
             }
         }
@@ -1076,14 +1087,16 @@ namespace retracesoftware_stream {
             PyObject * path;
             PyObject * serializer;
             PyObject * thread = nullptr;
+            int verbose = 0;
 
-            static const char* kwlist[] = {"path", "serializer", "thread", nullptr};  // Keywords allowed
+            static const char* kwlist[] = {"path", "serializer", "thread", "verbose", nullptr};  // Keywords allowed
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|O", (char **)kwlist, &path, &serializer, &thread)) {
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|Op", (char **)kwlist, &path, &serializer, &thread, &verbose)) {
                 return -1;  
                 // Return NULL to propagate the parsing error
             }
 
+            self->verbose = verbose;
             self->path = Py_NewRef(path);
             self->serializer = Py_NewRef(serializer);
             self->thread = thread ? retracesoftware::FastCall(thread) : retracesoftware::FastCall();
@@ -1284,6 +1297,7 @@ namespace retracesoftware_stream {
     static PyMemberDef members[] = {
         {"bytes_written", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, bytes_written), READONLY, "TODO"},
         {"messages_written", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, messages_written), READONLY, "TODO"},
+        {"verbose", T_BOOL, OFFSET_OF_MEMBER(ObjectWriter, verbose), 0, "TODO"},
         // {"path", T_OBJECT, OFFSET_OF_MEMBER(Writer, path), READONLY, "TODO"},
         // {"on_pid_change", T_OBJECT_EX, OFFSET_OF_MEMBER(Writer, on_pid_change), 0, "TODO"},
         {NULL}  /* Sentinel */
