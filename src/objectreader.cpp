@@ -415,6 +415,30 @@ namespace retracesoftware_stream {
             return Py_NewRef(dict.get());
         }
 
+        void read_delete(size_t size) {
+            if (verbose) printf("consumed DELETE\n");
+
+            int64_t from_end = size + 1;
+            assert(from_end <= next_handle);
+            uint64_t offset = next_handle - from_end;
+            
+            assert(lookup.contains(offset));
+            Py_DECREF(lookup[offset]);
+            lookup.erase(offset);
+        }
+
+        void read_binding_delete(size_t size) {
+            if (verbose) printf("consumed BINDING_DELETE\n");
+
+            int64_t index = size;
+            auto it = bindings.find(index);
+
+            if (it != bindings.end()) {
+                Py_DECREF(it->second);
+                bindings.erase(it);
+            }
+        }
+
         PyObject * read_sized(Control control) {
 
             // assert ((control & 0xF) != SizedTypes::DEL);
@@ -437,12 +461,53 @@ namespace retracesoftware_stream {
                 case SizedTypes::PICKLED: return read_pickled(size);
 
                 case SizedTypes::BINDING_DELETE:
-                    raise(SIGTRAP);
+                    read_binding_delete(size);
+                    return read();
+
+                case SizedTypes::DELETE:
+                    read_delete(size);
+                    return read();
 
                 default:
                     PyErr_Format(PyExc_RuntimeError, "unknown sized type: %i", control.Sized.type);
                     throw nullptr;
             } 
+        }
+
+        void read_ext_bind() {
+            if (verbose) printf("consumed EXT_BIND\n");
+
+            PyTypeObject * cls = (PyTypeObject *)read();
+            
+            if (!PyType_Check((PyObject *)cls)) {
+                PyErr_Format(PyExc_TypeError, "Expected next item read to be a type but was: %S", cls);
+                throw nullptr;
+            }
+            PyObject * empty = PyTuple_New(0);
+
+            PyObject * instance = cls->tp_new(cls, empty, nullptr);
+
+            Py_DECREF(empty);
+            Py_DECREF(cls);
+
+            // PyObject * instance = PyObject_CallNoArgs(cls);
+            if (!instance) {
+                throw nullptr;
+            }
+            bindings[binding_counter++] = instance;
+        }
+
+        void read_thread_switch() {
+            if (verbose) printf("consumed THREAD_SWITCH\n");
+
+            Py_XDECREF(active_thread);
+            active_thread = read();
+
+            if (verbose) {
+                PyObject * str = PyObject_Str(active_thread);
+                if (verbose) printf("consumed THREAD_SWITCH %s\n", PyUnicode_AsUTF8(str));
+                Py_DECREF(str);
+            }
         }
 
         PyObject * read_fixedsize(FixedSizeTypes type) {
@@ -465,6 +530,23 @@ namespace retracesoftware_stream {
                 case FixedSizeTypes::INT64:
                     return PyLong_FromLongLong(read_int64());
                 // case FixedSizeTypes::INLINE_NEW_HANDLE: return Py_NewRef(store_handle());
+
+                case FixedSizeTypes::EXT_BIND:
+                    read_ext_bind();
+                    return read();
+
+                case FixedSizeTypes::NEW_HANDLE:
+                    if (verbose) printf("consumed NEW_HANDLE\n");
+                    store_handle();
+                    return read();
+
+                case FixedSizeTypes::THREAD_SWITCH:
+                    read_thread_switch();
+                    return read();
+
+                case FixedSizeTypes::BIND:
+                    return bind_singleton;
+
                 default:
                     raise(SIGTRAP);
 
@@ -511,71 +593,13 @@ namespace retracesoftware_stream {
             return ref;
         }
 
-        bool consume(Control control) {
-            if (sized_type(control) == SizedTypes::DELETE) {
-                if (verbose) printf("consumed DELETE\n");
-
-                int64_t from_end = read_sized_number(control) + 1;
-                assert(from_end <= next_handle);
-                uint64_t offset = next_handle - from_end;
-                
-                assert(lookup.contains(offset));
-                Py_DECREF(lookup[offset]);
-                lookup.erase(offset);
-                return true;
-            } else if (fixed_size_type(control) == FixedSizeTypes::EXT_BIND) {
-                if (verbose) printf("consumed EXT_BIND\n");
-
-                PyTypeObject * cls = (PyTypeObject *)read();
-                
-                if (!PyType_Check((PyObject *)cls)) {
-                    PyErr_Format(PyExc_TypeError, "Expected next item read to be a type but was: %S", cls);
-                    throw nullptr;
-                }
-                PyObject * empty = PyTuple_New(0);
-
-                PyObject * instance = cls->tp_new(cls, empty, nullptr);
-
-                Py_DECREF(empty);
-                Py_DECREF(cls);
-
-                // PyObject * instance = PyObject_CallNoArgs(cls);
-                if (!instance) {
-                    throw nullptr;
-                }
-                bindings[binding_counter++] = instance;
-                return true;
-            } else if (fixed_size_type(control) == FixedSizeTypes::NEW_HANDLE) {
-                if (verbose) printf("consumed NEW_HANDLE\n");
-
-                store_handle();
-                return true;
-            } else if (fixed_size_type(control) == FixedSizeTypes::THREAD_SWITCH) {
-                if (verbose) printf("consumed THREAD_SWITCH\n");
-
-                Py_XDECREF(active_thread);
-                active_thread = read();
-
-                if (verbose) {
-                    PyObject * str = PyObject_Str(active_thread);
-                    if (verbose) printf("consumed THREAD_SWITCH %s\n", PyUnicode_AsUTF8(str));
-                    Py_DECREF(str);
-                }
-                return true;
-            } else if (sized_type(control) == SizedTypes::BINDING_DELETE) {
-                if (verbose) printf("consumed BINDING_DELETE\n");
-
-                int64_t index = read_sized_number(control);
-                auto it = bindings.find(index);
-
-                if (it != bindings.end()) {
-                    Py_DECREF(it->second);
-                    bindings.erase(it);
-                }
-                return true;
-            }
-            return false;
-        }
+        // bool consume(Control control) {
+            
+        //     if (fixed_size_type(control) == FixedSizeTypes::THREAD_SWITCH) {
+        //         return true;
+        //     }
+        //     return false;
+        // }
 
         Control read_control() {
             Control c;
@@ -584,12 +608,11 @@ namespace retracesoftware_stream {
         }
 
         PyObject * read_root() {
-            Control control = read_control();
             
-            while (consume(control)) {
-                control = read_control();
-            }
-            PyObject * res = fixed_size_type(control) == FixedSizeTypes::BIND ? bind_singleton : read(control);
+            // while (consume(control)) {
+            //     control = read_control();
+            // }
+            PyObject * res = read();
 
             if (verbose) {
                 PyObject * str = PyObject_Str(res);
