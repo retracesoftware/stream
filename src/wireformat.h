@@ -163,4 +163,5 @@ namespace retracesoftware_stream {
 
     // const char * RootTypes_Name(enum RootTypes root);
     const char * FixedSizeTypes_Name(enum FixedSizeTypes root);
+    const char * SizedTypes_Name(enum SizedTypes root);
 }

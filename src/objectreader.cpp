@@ -346,7 +346,10 @@ namespace retracesoftware_stream {
 
             Py_DECREF(bytes);
 
-            if (!deserialized) throw nullptr;
+            if (!deserialized) {
+                // PyErr_Print();   
+                throw nullptr;
+            }
             return deserialized;
         }
 
@@ -444,7 +447,7 @@ namespace retracesoftware_stream {
             // assert ((control & 0xF) != SizedTypes::DEL);
             size_t size = read_unsigned_number(control);
 
-            if (verbose) printf("%s ", SizedTypes_Name(control.Sized.type));
+            if (verbose) printf("%s(%i) ", SizedTypes_Name(control.Sized.type), size);
 
             switch (control.Sized.type) {
                 case SizedTypes::UINT: 

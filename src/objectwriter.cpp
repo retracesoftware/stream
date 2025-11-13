@@ -74,15 +74,18 @@ namespace retracesoftware_stream {
     struct StreamHandle : public PyObject {
         int index;
         PyObject * writer;
+        PyObject * object;
         vectorcallfunc vectorcall;
         
         static int traverse(StreamHandle* self, visitproc visit, void* arg) {
             Py_VISIT(self->writer);
+            Py_VISIT(self->object);
             return 0;
         }
 
         static int clear(StreamHandle* self) {
             Py_CLEAR(self->writer);
+            Py_CLEAR(self->object);
             return 0;
         }
     };
@@ -159,6 +162,13 @@ namespace retracesoftware_stream {
                 writer->check_thread();
 
                 writer->write_handle_ref(self->index);
+
+                if (writer->verbose) {
+                    PyObject * str = PyObject_Str(self->object);
+                    printf("-- %s\n", PyUnicode_AsUTF8(str));
+                    Py_DECREF(str);
+                }
+
                 writer->messages_written++;
 
                 size_t total_args = PyVectorcall_NARGS(nargsf) + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0);
@@ -167,7 +177,7 @@ namespace retracesoftware_stream {
                     writer->write(args[i]);
                     if (writer->verbose) {
                         PyObject * str = PyObject_Str(args[i]);
-                        printf("written: %s\n", PyUnicode_AsUTF8(str));
+                        printf("-- %s\n", PyUnicode_AsUTF8(str));
                         Py_DECREF(str);
                     }
                     writer->messages_written++;
@@ -223,7 +233,7 @@ namespace retracesoftware_stream {
             Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
         }
 
-        PyObject * stream_handle(int index) {
+        PyObject * stream_handle(int index, PyObject * obj) {
 
             StreamHandle * self = (StreamHandle *)StreamHandle_Type.tp_alloc(&StreamHandle_Type, 0);
             if (!self) return nullptr;
@@ -231,15 +241,22 @@ namespace retracesoftware_stream {
             self->writer = Py_NewRef(this);
             self->index = index;
             self->vectorcall = (vectorcallfunc)StreamHandle_vectorcall;
-            
+            self->object = Py_XNewRef(obj);
+
             return (PyObject *)self;
         }
 
         PyObject * handle(PyObject * obj) {
             write(FixedSizeTypes::NEW_HANDLE);
             write(obj);
+
+            if (verbose) {
+                PyObject * str = PyObject_Str(obj);
+                printf("-- %s\n", PyUnicode_AsUTF8(str));
+                Py_DECREF(str);
+            }
             // messages_written++;
-            return stream_handle(next_handle++);
+            return stream_handle(next_handle++, verbose ? obj : nullptr);
         }
 
         void write_str(PyObject * obj) {
@@ -593,6 +610,9 @@ namespace retracesoftware_stream {
         }
 
         inline void write(FixedSizeTypes obj) {
+            if (verbose) {
+                printf("%s ", FixedSizeTypes_Name(obj));
+            }
             write(create_fixed_size(obj));
         }
 
@@ -685,6 +705,10 @@ namespace retracesoftware_stream {
         void write_size(SizedTypes type, Py_ssize_t size) {
             assert (type < 16);
 
+            if (verbose) {
+                printf("%s(%i) ", SizedTypes_Name(type), size);
+            }
+
             Control control;
             control.Sized.type = type;
 
@@ -767,6 +791,12 @@ namespace retracesoftware_stream {
             StreamHandle * handle = reinterpret_cast<StreamHandle *>(obj);
 
             write_handle_ref(handle->index);
+
+            if (verbose) {
+                PyObject * str = PyObject_Str(handle->object);
+                printf("-- %s\n", PyUnicode_AsUTF8(str));
+                Py_DECREF(str);
+            }
         }
 
         // PyObject * foo(PyObject * obj) {
