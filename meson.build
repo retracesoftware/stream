@@ -22,6 +22,8 @@ py.extension_module(
   sources: [
             'src/objectreader.cpp',
             'src/objectwriter.cpp',
+            'src/stack.cpp',
+            'src/search.cpp',
             'src/module.cpp'],
   
   install: true,

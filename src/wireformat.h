@@ -74,7 +74,10 @@ namespace retracesoftware_stream {
         
         THREAD_SWITCH,
         BIND,
+        // NEW_BINDING,
         EXT_BIND,
+        STACK,
+        ADD_FILENAME,
 
         FixedSizeTypes__LAST__, // 11
     };

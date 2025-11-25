@@ -1,4 +1,5 @@
 #include "stream.h"
+#include <cstdint>
 #include <structmember.h>
 #include "wireformat.h"
 #include <algorithm>
@@ -8,7 +9,9 @@
 
 #include <vector>
 #include <algorithm> 
+#include <span>
 #include "unordered_dense.h"
+#include "base.h"
 
 using namespace ankerl::unordered_dense;
 
@@ -117,8 +120,8 @@ namespace retracesoftware_stream {
                 throw nullptr;
         }
     }
-
-    struct ObjectWriter : public PyObject {
+    
+    struct ObjectWriter : public ReaderWriterBase {
         
         FILE * file;
         size_t bytes_written;
@@ -126,7 +129,11 @@ namespace retracesoftware_stream {
         int next_handle;
         PyThreadState * last_thread_state;
         map<PyObject *, int> bindings;
+        map<PyObject *, uint16_t> filename_index;
+
+        // map<PyCodeObject *, int> code_objects;
         int binding_counter;
+        bool stacktraces;
 
         // map<PyObject *, uint64_t> placeholders;
         // map<PyTypeObject *, retracesoftware::FastCall> type_serializers;
@@ -145,10 +152,84 @@ namespace retracesoftware_stream {
 
         // PyObject * fast_lookup[5];
         PyObject * serializer;
-        PyObject * path;
+        
         retracesoftware::FastCall thread;
 
         vectorcallfunc vectorcall;
+
+        void write_expected(uint64_t i) {
+            if (i < 255) {
+                write((uint8_t)i);
+            } else {
+                write((uint8_t)255);
+                write(i);
+            }
+        }
+
+        template<typename T>
+        void write_expected(std::vector<T> vec) {
+            write_expected_int(vec.size());
+            for (auto elem : vec) {
+                write(elem);
+            }
+        }
+
+        // void write(CodeHash hash) {
+        //     write(hash);
+        //     // write(hash[1]);
+        // }
+
+        void write_stacktrace() {
+
+            if (stacktraces) {
+                static thread_local std::vector<Frame> stack;
+
+                size_t old_size = stack.size();
+                size_t skip = update_stack(exclude_stacktrace, stack);
+                
+                auto new_frame_elements = std::span(stack).subspan(skip);
+
+                for (auto frame : new_frame_elements) {
+                    PyObject * filename = frame.code_object->co_filename;
+                    assert(PyUnicode_Check(filename));
+
+                    if (!filename_index.contains(filename)) {
+                        write_control(CreateFixedSize(FixedSizeTypes::ADD_FILENAME));    
+                        write(filename);
+                        filename_index[filename] = filename_index_counter++;
+                    }
+                    // if (!code_objects.contains(frame.code_object)) {
+                    //     code_objects[frame.code_object] = code_object_counter++;
+                        
+                    //     PyObject * hash = PyObject_CallOneArg(hashcode, (PyObject *)frame.code_object);
+                    //     if (!hash) throw nullptr;
+
+                    //     write_control(CreateFixedSize(FixedSizeTypes::ADD_CODE_OBJ));
+                    //     // for fast lookup, hashcodes might be slow
+                    //     write(frame.code_object->co_qualname);
+                    //     write(hash);
+                    //     Py_DECREF(hash);                            
+                    // }
+                }
+
+                // one byte
+                write_control(CreateFixedSize(FixedSizeTypes::STACK));
+                write((uint64_t)MAGIC);
+
+                // how many to discard
+                write_expected(old_size - skip);
+
+                write_expected(new_frame_elements.size());
+
+                for (auto frame : new_frame_elements) {
+                    PyObject * filename = frame.code_object->co_filename;
+                    // printf("Writing: %i:%i\n", code_objects[frame.code_object], frame.instruction);
+                    write(filename_index[filename]);
+                    write(frame.lineno());
+                }
+                write((uint64_t)MAGIC);
+            }
+        }
 
         static PyObject * StreamHandle_vectorcall(StreamHandle * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
             
@@ -160,6 +241,8 @@ namespace retracesoftware_stream {
             }
             try {
                 writer->check_thread();
+        
+                writer->write_stacktrace();
 
                 writer->write_handle_ref(self->index);
 
@@ -189,9 +272,10 @@ namespace retracesoftware_stream {
                 return nullptr;
             }
         }
-
+        
         void bind(PyObject * obj, bool ext) {
             check_thread();
+            write_stacktrace();
 
             if (bindings.contains(obj)) {
                 PyErr_Format(PyExc_RuntimeError, "object: %S already bound", obj);
@@ -924,6 +1008,7 @@ namespace retracesoftware_stream {
 
         void write_all(PyObject*const * args, size_t nargs) {
             check_thread();
+            write_stacktrace();
 
             for (size_t i = 0; i < nargs; i++) {
                 write(args[i]);
@@ -1117,16 +1202,20 @@ namespace retracesoftware_stream {
             PyObject * path;
             PyObject * serializer;
             PyObject * thread = nullptr;
+
             int verbose = 0;
+            int stacktraces = 0;
 
-            static const char* kwlist[] = {"path", "serializer", "thread", "verbose", nullptr};  // Keywords allowed
+            static const char* kwlist[] = {"path", "serializer", "thread", "verbose", "stacktraces", nullptr};  // Keywords allowed
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|Op", (char **)kwlist, &path, &serializer, &thread, &verbose)) {
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|Opp", (char **)kwlist, &path, &serializer, &thread, &verbose, &stacktraces)) {
                 return -1;  
                 // Return NULL to propagate the parsing error
             }
 
             self->verbose = verbose;
+            self->stacktraces = stacktraces;
+
             self->path = Py_NewRef(path);
             self->serializer = Py_NewRef(serializer);
             self->thread = thread ? retracesoftware::FastCall(thread) : retracesoftware::FastCall();
@@ -1143,7 +1232,12 @@ namespace retracesoftware_stream {
             self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectWriter::py_vectorcall);
             self->last_thread_state = PyThreadState_Get();
             self->binding_counter = 0;
+            self->filename_index_counter = 0;
+
             new (&self->bindings) map<PyObject *, int>();
+            new (&self->filename_index) map<PyObject *, uint16_t>();
+
+            new (&self->exclude_stacktrace) set<PyFunctionObject *>();
 
             writers.push_back(self);
 
@@ -1178,7 +1272,6 @@ namespace retracesoftware_stream {
             Py_VISIT(self->thread.callable);
             Py_VISIT(self->path);
             Py_VISIT(self->serializer);
-
             return 0;
         }
 
@@ -1316,6 +1409,8 @@ namespace retracesoftware_stream {
         {"bind", (PyCFunction)ObjectWriter::py_bind, METH_O, "TODO"},
         {"ext_bind", (PyCFunction)ObjectWriter::py_ext_bind, METH_O, "TODO"},
         {"store_hash_secret", (PyCFunction)ObjectWriter::py_store_hash_secret, METH_NOARGS, "TODO"},
+        {"exclude_from_stacktrace", (PyCFunction)ReaderWriterBase::py_exclude_from_stacktrace, METH_O, "TODO"},
+
         // {"unique", (PyCFunction)ObjectWriter::py_unique, METH_O, "TODO"},
         // {"delete", (PyCFunction)ObjectWriter::py_delete, METH_O, "TODO"},
 

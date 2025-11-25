@@ -1,6 +1,5 @@
 #include "stream.h"
 #include <structmember.h>
-#include "unordered_dense.h"
 #include "wireformat.h"
 #include <algorithm>
 #include <fcntl.h>
@@ -9,7 +8,40 @@
 #include <condition_variable>
 #include <mutex>
 
-using namespace ankerl::unordered_dense;
+#include "base.h"
+
+// #include <frameobject.h>
+
+// void print_current_stack(void)
+// {
+//     // Get the current frame (top of the stack)
+//     PyFrameObject *frame = PyEval_GetFrame();  // borrowed reference!
+
+//     if (frame == NULL) {
+//         PySys_WriteStderr("<no Python frame>\n");
+//         return;
+//     }
+
+//     PySys_WriteStderr("Traceback (most recent call last):\n");
+
+//     // Walk up the frame chain and print each one
+//     for (PyFrameObject *f = frame; f != NULL; f = f->f_back) {
+//         PyCodeObject *code = PyFrame_GetCode(f);  // new reference
+//         if (!code) continue;
+
+//         const char *filename = PyUnicode_AsUTF8(code->co_filename);
+//         const char *name     = PyUnicode_AsUTF8(code->co_name);
+//         int lineno           = PyFrame_GetLineNumber(f);
+
+//         if (!filename) filename = "<unknown file>";
+//         if (!name)     name     = "<unknown function>";
+
+//         PySys_WriteStderr("  File \"%s\", line %d, in %s\n",
+//                           filename, lineno, name);
+
+//         Py_DECREF(code);
+//     }
+// }
 
 namespace retracesoftware_stream {
 
@@ -98,13 +130,9 @@ namespace retracesoftware_stream {
             case FixedSizeTypes::INT64: return "INT64";
             case FixedSizeTypes::BIND: return "BIND";
             case FixedSizeTypes::EXT_BIND: return "EXT_BIND";
+            case FixedSizeTypes::STACK: return "STACK";
+            case FixedSizeTypes::ADD_FILENAME: return "ADD_FILENAME";
 
-            // case FixedSizeTypes::PLACEHOLDER: return "PLACEHOLDER";
-
-            // case FixedSizeTypes::EXTREF: return "EXTREF";
-            // case FixedSizeTypes::CACHE_LOOKUP: return "CACHE_LOOKUP";
-            // case FixedSizeTypes::CACHE_ADD: return "CACHE_ADD";
-            // case FixedSizeTypes::METHOD_DESCRIPTOR: return "METHOD_DESCRIPTOR";
             default: return nullptr;
         }
     }
@@ -150,7 +178,7 @@ namespace retracesoftware_stream {
         };
     }
 
-    struct ObjectReader : public PyObject {
+    struct ObjectReader : public ReaderWriterBase {
         
         FILE * file;
         size_t bytes_read;
@@ -161,16 +189,18 @@ namespace retracesoftware_stream {
         std::condition_variable wakeup;
         int next_control;
         map<int, PyObject *> bindings;
+        map<uint16_t, PyObject *> index2filename;
         PyObject * bind_singleton;
         int binding_counter;
-
+        PyObject * on_stack_difference;
         int pid;
+
+        map<PyCodeObject *, Py_hash_t> obj_to_hash;
 
         map<uint64_t, PyObject *> lookup;
         // map<PyTypeObject *, PyObject *> type_deserializers;
 
         PyObject * deserializer;
-        PyObject * path;
         PyObject * transform;
         PyObject * thread;
         PyObject * active_thread;
@@ -188,66 +218,66 @@ namespace retracesoftware_stream {
             bytes_read += size;
         }
 
-        inline uint8_t read_uint8() {
-            uint8_t byte;
-            read(&byte, 1);
-            return byte;
-        }
+        template<typename T>
+        T _read() {
+            if constexpr (std::is_same_v<T, int8_t>) {
+                return (int8_t)_read<uint8_t>();
+            }
+            else if constexpr (std::is_same_v<T, uint8_t>) {
+                uint8_t byte;
+                read(&byte, 1);
+                return byte;
+            }
+            else if constexpr (std::is_same_v<T, int16_t>) {
+                return (int16_t)_read<uint16_t>();
+            }
+            else if constexpr (std::is_same_v<T, uint16_t>) {
+                uint8_t buffer[sizeof(uint16_t)];
+                read(buffer, sizeof(buffer));
 
-        inline int8_t read_int8() {
-            return (int8_t)read_uint8();
-        }
+                uint16_t value = (uint16_t)buffer[0];
+                value |= ((uint16_t)buffer[1] << 8);
+                return value;
+            }
+            else if constexpr (std::is_same_v<T, int32_t>) {
+                return (int16_t)_read<uint32_t>();
+            }
+            else if constexpr (std::is_same_v<T, uint32_t>) {
+                uint8_t buffer[sizeof(uint32_t)];
+                read(buffer, sizeof(buffer));
 
-        inline uint16_t read_uint16() {
-            uint8_t buffer[sizeof(uint16_t)];
-            read(buffer, sizeof(buffer));
+                uint32_t value = (uint32_t)buffer[0];
+                value |= ((uint32_t)buffer[1] << 8);
+                value |= ((uint32_t)buffer[2] << 16);
+                value |= ((uint32_t)buffer[3] << 24);
+                return value;
+            }
+            else if constexpr (std::is_same_v<T, int64_t>) {
+                return (int64_t)_read<uint64_t>();
+            }
+            else if constexpr (std::is_same_v<T, uint64_t>) {
+                uint8_t buffer[sizeof(uint64_t)];
+                read(buffer, sizeof(buffer));
 
-            uint16_t value = (uint16_t)buffer[0];
-            value |= ((uint16_t)buffer[1] << 8);
-            return value;
-        }
+                uint64_t value = (uint64_t)buffer[0];
+                value |= ((uint64_t)buffer[1] << 8);
+                value |= ((uint64_t)buffer[2] << 16);
+                value |= ((uint64_t)buffer[3] << 24);
+                value |= ((uint64_t)buffer[4] << 32);
+                value |= ((uint64_t)buffer[5] << 40);
+                value |= ((uint64_t)buffer[6] << 48);
+                value |= ((uint64_t)buffer[7] << 56);
+                return value;
+            }
 
-        inline int16_t read_int16() {
-            return (int16_t)read_uint16();
-        }
-
-        inline uint32_t read_uint32() {
-            uint8_t buffer[sizeof(uint32_t)];
-            read(buffer, sizeof(buffer));
-
-            uint32_t value = (uint32_t)buffer[0];
-            value |= ((uint32_t)buffer[1] << 8);
-            value |= ((uint32_t)buffer[2] << 16);
-            value |= ((uint32_t)buffer[3] << 24);
-            return value;
-        }
-
-        inline int32_t read_int32() {
-            return (int32_t)read_uint32();
-        }
-
-        inline uint64_t read_uint64() {
-            uint8_t buffer[sizeof(uint64_t)];
-            read(buffer, sizeof(buffer));
-
-            uint64_t value = (uint64_t)buffer[0];
-            value |= ((uint64_t)buffer[1] << 8);
-            value |= ((uint64_t)buffer[2] << 16);
-            value |= ((uint64_t)buffer[3] << 24);
-            value |= ((uint64_t)buffer[4] << 32);
-            value |= ((uint64_t)buffer[5] << 40);
-            value |= ((uint64_t)buffer[6] << 48);
-            value |= ((uint64_t)buffer[7] << 56);
-            return value;
-        }
-
-        inline int64_t read_int64() {
-            return (int64_t)read_uint64();
-        }
-
-        double read_float() {
-            uint64_t raw = read_uint64();
-            return *(double *)&raw;
+            else if constexpr (std::is_same_v<T, double>) {
+                uint64_t raw = _read<uint64_t>();
+                return *(double *)&raw;
+            }
+            else {
+                static_assert(std::is_void_v<T>, "Unsupported type in read<T>()");
+                // static_assert(false, "read<T>() not specialized for this type");
+            }
         }
 
         PyObject * read_handle(int64_t index) {
@@ -270,13 +300,13 @@ namespace retracesoftware_stream {
 
             switch (control.Sized.size) {
                 case ONE_BYTE_SIZE:
-                    return (size_t)read_uint8();
+                    return (size_t)_read<uint8_t>();
                 case TWO_BYTE_SIZE:
-                    return (size_t)read_uint16();
+                    return (size_t)_read<uint16_t>();
                 case FOUR_BYTE_SIZE:
-                    return (size_t)read_uint32();
+                    return (size_t)_read<uint32_t>();
                 case EIGHT_BYTE_SIZE:
-                    return (size_t)read_uint64();
+                    return (size_t)_read<uint64_t>();
                 default:
                     return (size_t)(control.Sized.size);
             }
@@ -347,7 +377,7 @@ namespace retracesoftware_stream {
             Py_DECREF(bytes);
 
             if (!deserialized) {
-                // PyErr_Print();   
+                // PyErr_Print();
                 throw nullptr;
             }
             return deserialized;
@@ -442,6 +472,16 @@ namespace retracesoftware_stream {
             }
         }
 
+        uint64_t read_uint() {
+            Control control = read_control();
+
+            if (control.Sized.type != SizedTypes::UINT) {
+                PyErr_Format(PyExc_RuntimeError, "TODO");
+                throw nullptr;
+            }
+            return read_unsigned_number(control);
+        }
+
         PyObject * read_sized(Control control) {
 
             // assert ((control & 0xF) != SizedTypes::DEL);
@@ -500,6 +540,99 @@ namespace retracesoftware_stream {
             bindings[binding_counter++] = instance;
         }
 
+        uint64_t read_expected_int() {
+            uint8_t i = _read<uint8_t>();
+            
+            return i == 255 ? _read<uint64_t>() : (uint64_t)i;
+        }
+
+        void stack_difference(std::vector<PyCodeObject *> common, PyCodeObject * replay, PyObject * qualname, PyObject * filename) {
+            // print_current_stack();
+            // PyTraceBack_Print();
+            raise(SIGTRAP);
+            // for (auto co : common) {
+            //     printf("%s, %s\n", )
+            // }
+
+        }
+
+        template<typename T>
+        std::vector<T> read_expected_vector_of()
+        {
+            size_t size = read_expected_int();
+            std::vector<T> result;
+            result.reserve(size);
+
+            while (size--) {
+                result.push_back(_read<T>());
+            }
+            return result;
+        }
+
+        void read_add_filename() {        
+            index2filename[filename_index_counter++] = read();
+        }
+
+        void on_difference(std::vector<CodeLocation> previous, std::vector<CodeLocation> record, std::vector<CodeLocation> replay) {
+            auto pythonize = [](std::vector<CodeLocation> frames) { 
+                return to_pylist(frames | std::views::transform(&CodeLocation::as_tuple));
+            };
+
+            PyUniquePtr py_previous(pythonize(previous));
+            PyUniquePtr py_record(pythonize(record));
+            PyUniquePtr py_replay(pythonize(replay));
+
+            PyObject * res = PyObject_CallFunctionObjArgs(on_stack_difference, py_previous.get(), py_record.get(), py_replay.get(), nullptr);
+            Py_XDECREF(res);
+            if (!res) throw nullptr;
+        }
+
+        std::vector<CodeLocation> read_record_stack() {
+            static thread_local std::vector<CodeLocation> stack;
+            size_t to_drop = read_expected_int();
+
+            assert(stack.size() >= to_drop);
+            while (to_drop--) stack.pop_back();
+
+            uint64_t size = read_expected_int();
+            while (size--) {
+                stack.push_back(CodeLocation(index2filename[_read<uint16_t>()], _read<uint16_t>()));
+            }
+            return stack;
+        }
+
+        std::vector<CodeLocation> read_replay_stack() {
+            static thread_local std::vector<Frame> stack;
+            static thread_local std::vector<CodeLocation> locations;
+
+            size_t common = update_stack(exclude_stacktrace, stack);
+
+            while (locations.size() > common) locations.pop_back();
+
+            for (Frame frame : stack | std::views::drop(common)) {
+                locations.push_back(frame.location());
+            }
+            return locations;
+        }
+
+        void read_stack() {
+
+            assert(_read<uint64_t>() == MAGIC);
+
+            static thread_local std::vector<CodeLocation> previous;
+
+            auto record = read_record_stack();
+            auto replay = read_replay_stack();
+
+            if (record == replay) {
+                previous = record;
+            } else {
+                on_difference(previous, record, replay);
+                previous.clear();
+            }
+            assert(_read<uint64_t>() == MAGIC);
+        }
+
         void read_thread_switch() {
             if (verbose) printf("consumed THREAD_SWITCH\n");
 
@@ -529,13 +662,17 @@ namespace retracesoftware_stream {
                     return PyLong_FromLong(-1);
                 // case FixedSizeTypes::BIND: return Py_NewRef(bind_singleton);
                 case FixedSizeTypes::FLOAT:
-                    return PyFloat_FromDouble(read_float());
+                    return PyFloat_FromDouble(_read<double>());
                 case FixedSizeTypes::INT64:
-                    return PyLong_FromLongLong(read_int64());
+                    return PyLong_FromLongLong(_read<int64_t>());
                 // case FixedSizeTypes::INLINE_NEW_HANDLE: return Py_NewRef(store_handle());
 
                 case FixedSizeTypes::EXT_BIND:
                     read_ext_bind();
+                    return read();
+
+                case FixedSizeTypes::ADD_FILENAME:
+                    read_add_filename();
                     return read();
 
                 case FixedSizeTypes::NEW_HANDLE:
@@ -549,6 +686,14 @@ namespace retracesoftware_stream {
 
                 case FixedSizeTypes::BIND:
                     return bind_singleton;
+
+                // case FixedSizeTypes::CODEOBJ:
+                //     read_codeobj();
+                //     return read();
+
+                case FixedSizeTypes::STACK:
+                    read_stack();
+                    return read();
 
                 default:
                     raise(SIGTRAP);
@@ -568,13 +713,13 @@ namespace retracesoftware_stream {
         int64_t read_sized_number(Control control) {
             switch (control.Sized.size) {
                 case ONE_BYTE_SIZE:
-                    return (int64_t)read_int8();
+                    return (int64_t)_read<int8_t>();
                 case TWO_BYTE_SIZE:
-                    return (int64_t)read_int16();
+                    return (int64_t)_read<int16_t>();
                 case FOUR_BYTE_SIZE:
-                    return (int64_t)read_int32();
+                    return (int64_t)_read<int32_t>();
                 case EIGHT_BYTE_SIZE:
-                    return (int64_t)read_int64();
+                    return _read<int64_t>();
                 default:
                     return (int64_t)(control.Sized.size);
             }
@@ -606,7 +751,7 @@ namespace retracesoftware_stream {
 
         Control read_control() {
             Control c;
-            c.raw = read_uint8();
+            c.raw = _read<uint8_t>();
             return c;
         }
 
@@ -898,16 +1043,21 @@ namespace retracesoftware_stream {
                 PyObject * deserializer;
                 PyObject * transform = nullptr;
                 PyObject * thread = nullptr;
+                PyObject * on_stack_difference;
+
                 int verbose = 0;
                 static const char* kwlist[] = {
                     "path", 
                     "deserializer", 
+                    "on_stack_difference",
                     "transform", 
                     "thread",
                     "verbose",
                     nullptr};  // Keywords allowed
 
-                if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OOp", (char **)kwlist, &path, &deserializer, &transform, &thread, &verbose)) {
+                if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO|OOp", (char **)kwlist, 
+                    &path, &deserializer, &on_stack_difference,
+                    &transform, &thread, &verbose)) {
                     return -1;
                     // Return NULL to propagate the parsing error
                 }
@@ -922,6 +1072,7 @@ namespace retracesoftware_stream {
                 self->transform = transform != Py_None ? Py_XNewRef(transform) : nullptr;
                 self->verbose = verbose;
 
+                self->on_stack_difference = Py_NewRef(on_stack_difference);
                 // self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectReader::py_vectorcall);
                 self->pending_reads = PyDict_New();
                 self->stacktraces = nullptr;
@@ -932,8 +1083,12 @@ namespace retracesoftware_stream {
                     if (!self->active_thread) return -1;
                 }
 
-                self->binding_counter = 0;
+                self->binding_counter = self->filename_index_counter = 0;
+
                 new (&self->bindings) map<int, PyObject *>();
+                new (&self->obj_to_hash) map<PyCodeObject *, Py_hash_t>();
+                new (&self->index2filename) map<uint16_t, PyObject *>();
+                new (&self->exclude_stacktrace) set<PyFunctionObject *>();
 
                 self->file = open(path);
 
@@ -949,6 +1104,7 @@ namespace retracesoftware_stream {
             Py_VISIT(self->path);
             Py_VISIT(self->deserializer);
             Py_VISIT(self->bind_singleton);
+            Py_VISIT(self->on_stack_difference);
 
             for (const auto& [key, value] : self->lookup) {
                 Py_VISIT(value);
@@ -963,6 +1119,7 @@ namespace retracesoftware_stream {
             Py_CLEAR(self->path);
             Py_CLEAR(self->deserializer);
             Py_CLEAR(self->bind_singleton);
+            Py_CLEAR(self->on_stack_difference);
 
             for (const auto& [key, value] : self->lookup) {
                 Py_DECREF(value);
@@ -1083,6 +1240,7 @@ namespace retracesoftware_stream {
         {"load_hash_secret", (PyCFunction)ObjectReader::py_load_hash_secret, METH_NOARGS, "TODO"},
         {"wake_pending", (PyCFunction)ObjectReader::py_wake_pending, METH_NOARGS, "TODO"},
         {"bind", (PyCFunction)ObjectReader::py_bind, METH_VARARGS | METH_KEYWORDS, "TODO"},
+        {"exclude_from_stacktrace", (PyCFunction)ReaderWriterBase::py_exclude_from_stacktrace, METH_O, "TODO"},
 
         // {"dump_pending", (PyCFunction)ObjectReader::py_dump_pending, METH_O, "TODO"},
         // {"supply", (PyCFunction)ObjectReader::py_supply, METH_O, "supply the placeholder"},
@@ -1113,6 +1271,7 @@ namespace retracesoftware_stream {
     static PyGetSetDef getset[] = {
         {"path", (getter)ObjectReader::path_getter, (setter)ObjectReader::path_setter, "TODO", NULL},
         {"next_control", (getter)ObjectReader::next_control_getter, nullptr, "TODO", NULL},
+        // {"next_control", (getter)ObjectReader::next_control_getter, nullptr, "TODO", NULL},
         // {"pending", (getter)ObjectReader::pending_getter, nullptr, "TODO", NULL},
         // {"thread_number", (getter)Writer::thread_getter, (setter)Writer::thread_setter, "TODO", NULL},
         {NULL}  // Sentinel
