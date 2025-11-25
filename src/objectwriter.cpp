@@ -194,9 +194,20 @@ namespace retracesoftware_stream {
                     assert(PyUnicode_Check(filename));
 
                     if (!filename_index.contains(filename)) {
-                        write_control(CreateFixedSize(FixedSizeTypes::ADD_FILENAME));    
-                        write(filename);
-                        filename_index[filename] = filename_index_counter++;
+                        write_control(CreateFixedSize(FixedSizeTypes::ADD_FILENAME));
+
+                        if (normalize_path) {
+                            PyObject * normalized = PyObject_CallOneArg(normalize_path, filename);
+                            if (!normalized) {
+                                raise(SIGTRAP);
+                                throw nullptr;
+                            }
+                            write(normalized);
+                            Py_DECREF(normalized);
+                        } else {
+                            write(filename);
+                        }
+                        filename_index[Py_NewRef(filename)] = filename_index_counter++;
                     }
                     // if (!code_objects.contains(frame.code_object)) {
                     //     code_objects[frame.code_object] = code_object_counter++;
@@ -223,9 +234,17 @@ namespace retracesoftware_stream {
 
                 for (auto frame : new_frame_elements) {
                     PyObject * filename = frame.code_object->co_filename;
+                    
+
                     // printf("Writing: %i:%i\n", code_objects[frame.code_object], frame.instruction);
                     write(filename_index[filename]);
                     write(frame.lineno());
+
+                    if (PyUnicode_CompareWithASCIIString(filename, "/usr/local/lib/python3.11/site-packages/certifi/__init__.py") == 0) {
+                        printf("index: %i\n", filename_index[filename]);
+                        raise(SIGTRAP);
+                    }
+
                 }
                 write((uint64_t)MAGIC);
             }
@@ -1202,13 +1221,21 @@ namespace retracesoftware_stream {
             PyObject * path;
             PyObject * serializer;
             PyObject * thread = nullptr;
+            PyObject * normalize_path = nullptr;;
 
             int verbose = 0;
             int stacktraces = 0;
 
-            static const char* kwlist[] = {"path", "serializer", "thread", "verbose", "stacktraces", nullptr};  // Keywords allowed
+            static const char* kwlist[] = {
+                "path", 
+                "serializer", 
+                "thread", 
+                "verbose", 
+                "stacktraces", 
+                "normalize_path",
+                nullptr};  // Keywords allowed
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|Opp", (char **)kwlist, &path, &serializer, &thread, &verbose, &stacktraces)) {
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OppO", (char **)kwlist, &path, &serializer, &thread, &verbose, &stacktraces, &normalize_path)) {
                 return -1;  
                 // Return NULL to propagate the parsing error
             }
@@ -1233,6 +1260,7 @@ namespace retracesoftware_stream {
             self->last_thread_state = PyThreadState_Get();
             self->binding_counter = 0;
             self->filename_index_counter = 0;
+            self->normalize_path = Py_XNewRef(normalize_path);
 
             new (&self->bindings) map<PyObject *, int>();
             new (&self->filename_index) map<PyObject *, uint16_t>();
@@ -1272,6 +1300,7 @@ namespace retracesoftware_stream {
             Py_VISIT(self->thread.callable);
             Py_VISIT(self->path);
             Py_VISIT(self->serializer);
+            Py_VISIT(self->normalize_path);
             return 0;
         }
 
@@ -1280,6 +1309,7 @@ namespace retracesoftware_stream {
             Py_CLEAR(self->thread.callable);
             Py_CLEAR(self->path);
             Py_CLEAR(self->serializer);
+            Py_CLEAR(self->normalize_path);
 
             return 0;
         }
@@ -1423,6 +1453,8 @@ namespace retracesoftware_stream {
         {"bytes_written", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, bytes_written), READONLY, "TODO"},
         {"messages_written", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, messages_written), READONLY, "TODO"},
         {"verbose", T_BOOL, OFFSET_OF_MEMBER(ObjectWriter, verbose), 0, "TODO"},
+        {"normalize_path", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, normalize_path), 0, "TODO"},
+
         // {"path", T_OBJECT, OFFSET_OF_MEMBER(Writer, path), READONLY, "TODO"},
         // {"on_pid_change", T_OBJECT_EX, OFFSET_OF_MEMBER(Writer, on_pid_change), 0, "TODO"},
         {NULL}  /* Sentinel */

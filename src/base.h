@@ -40,6 +40,7 @@ namespace retracesoftware_stream {
         set<PyFunctionObject *> exclude_stacktrace;
         int filename_index_counter;
         PyObject * path;
+        PyObject * normalize_path;
 
         static PyObject * py_exclude_from_stacktrace(ReaderWriterBase * self, PyObject* obj) {
             if (!PyFunction_Check(obj)) {

@@ -198,6 +198,8 @@ namespace retracesoftware_stream {
         map<PyCodeObject *, Py_hash_t> obj_to_hash;
 
         map<uint64_t, PyObject *> lookup;
+        map<PyObject *, PyObject *> normalized_paths;
+
         // map<PyTypeObject *, PyObject *> type_deserializers;
 
         PyObject * deserializer;
@@ -546,16 +548,6 @@ namespace retracesoftware_stream {
             return i == 255 ? _read<uint64_t>() : (uint64_t)i;
         }
 
-        void stack_difference(std::vector<PyCodeObject *> common, PyCodeObject * replay, PyObject * qualname, PyObject * filename) {
-            // print_current_stack();
-            // PyTraceBack_Print();
-            raise(SIGTRAP);
-            // for (auto co : common) {
-            //     printf("%s, %s\n", )
-            // }
-
-        }
-
         template<typename T>
         std::vector<T> read_expected_vector_of()
         {
@@ -610,7 +602,16 @@ namespace retracesoftware_stream {
             while (locations.size() > common) locations.pop_back();
 
             for (Frame frame : stack | std::views::drop(common)) {
-                locations.push_back(frame.location());
+                CodeLocation location = frame.location();
+                if (normalize_path) {
+                    if (!normalized_paths.contains(location.filename)) {
+                        PyObject * normalized = PyObject_CallOneArg(normalize_path, location.filename);
+                        if (!normalized) throw nullptr;
+                        normalized_paths[Py_NewRef(location.filename)] = normalized;
+                    }
+                    location.filename = normalized_paths[location.filename];
+                }
+                locations.push_back(location);
             }
             return locations;
         }
@@ -1044,6 +1045,7 @@ namespace retracesoftware_stream {
                 PyObject * transform = nullptr;
                 PyObject * thread = nullptr;
                 PyObject * on_stack_difference;
+                PyObject * normalize_path = nullptr;;
 
                 int verbose = 0;
                 static const char* kwlist[] = {
@@ -1053,11 +1055,12 @@ namespace retracesoftware_stream {
                     "transform", 
                     "thread",
                     "verbose",
+                    "normalize_path",
                     nullptr};  // Keywords allowed
 
-                if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO|OOp", (char **)kwlist, 
+                if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO|OOpO", (char **)kwlist, 
                     &path, &deserializer, &on_stack_difference,
-                    &transform, &thread, &verbose)) {
+                    &transform, &thread, &verbose, &normalize_path)) {
                     return -1;
                     // Return NULL to propagate the parsing error
                 }
@@ -1071,6 +1074,7 @@ namespace retracesoftware_stream {
                 self->next_handle = 0;
                 self->transform = transform != Py_None ? Py_XNewRef(transform) : nullptr;
                 self->verbose = verbose;
+                self->normalize_path = Py_XNewRef(normalize_path);
 
                 self->on_stack_difference = Py_NewRef(on_stack_difference);
                 // self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectReader::py_vectorcall);
@@ -1089,6 +1093,7 @@ namespace retracesoftware_stream {
                 new (&self->obj_to_hash) map<PyCodeObject *, Py_hash_t>();
                 new (&self->index2filename) map<uint16_t, PyObject *>();
                 new (&self->exclude_stacktrace) set<PyFunctionObject *>();
+                new (&self->normalized_paths) map<PyObject *, PyObject *>();
 
                 self->file = open(path);
 
@@ -1105,6 +1110,7 @@ namespace retracesoftware_stream {
             Py_VISIT(self->deserializer);
             Py_VISIT(self->bind_singleton);
             Py_VISIT(self->on_stack_difference);
+            Py_VISIT(self->normalize_path);
 
             for (const auto& [key, value] : self->lookup) {
                 Py_VISIT(value);
@@ -1120,6 +1126,7 @@ namespace retracesoftware_stream {
             Py_CLEAR(self->deserializer);
             Py_CLEAR(self->bind_singleton);
             Py_CLEAR(self->on_stack_difference);
+            Py_CLEAR(self->normalize_path);
 
             for (const auto& [key, value] : self->lookup) {
                 Py_DECREF(value);
