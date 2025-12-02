@@ -14,7 +14,7 @@ def replace_prefix(s, old_prefix, new_prefix):
 
 class writer(_stream.ObjectWriter):
 
-    def __init__(self, path, thread, verbose = False, stacktraces = False):
+    def __init__(self, path, thread, verbose = False, stacktraces = False, magic_markers = False):
 
         cwd = os.getcwd()
 
@@ -24,11 +24,17 @@ class writer(_stream.ObjectWriter):
         super().__init__(path, thread = thread, serializer = self.serialize, 
                         verbose = verbose,
                         stacktraces = stacktraces,
-                        normalize_path = normalize_path)
+                        normalize_path = normalize_path,
+                        magic_markers = magic_markers)
         
         self.exclude_from_stacktrace(writer.serialize)
         self.type_serializer = {}
     
+    def __enter__(self): return self
+
+    def __exit__(self, *args):
+        self.close()
+
     def serialize(self, obj):
         # TODO, could add memoize one arg for performance
         # s = self.type_serializer.get(type(obj), pickle.dumps)(obj)
@@ -38,7 +44,7 @@ class writer(_stream.ObjectWriter):
 
 class reader(_stream.ObjectReader):
 
-    def __init__(self, path, thread, timeout_seconds = 5, verbose = False, on_stack_difference = None):
+    def __init__(self, path, thread, timeout_seconds = 5, verbose = False, on_stack_difference = None, magic_markers = False):
 
         self.timeout_seconds = timeout_seconds
 
@@ -52,11 +58,17 @@ class reader(_stream.ObjectReader):
                          on_stack_difference = on_stack_difference,
                          deserializer = self.deserialize,
                          verbose = verbose,
-                         normalize_path = normalize_path)
+                         normalize_path = normalize_path,
+                         magic_markers = magic_markers)
         
         self.exclude_from_stacktrace(reader.__call__)
         self.type_deserializer = {}
     
+    def __enter__(self): return self
+
+    def __exit__(self, *args):
+        self.close()
+
     def __call__(self):
         return super().__call__(timeout_seconds = self.timeout_seconds,
                        stacktrace = inspect.stack)

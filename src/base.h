@@ -1,6 +1,8 @@
 #include "stream.h"
 #include "wireformat.h"
 
+#define MAGIC 0x8E7BACE50F73A8E
+
 // #include <frameobject.h>
 
 // void print_current_stack(void)
@@ -41,6 +43,7 @@ namespace retracesoftware_stream {
         int filename_index_counter;
         PyObject * path;
         PyObject * normalize_path;
+        bool magic_markers;
 
         static PyObject * py_exclude_from_stacktrace(ReaderWriterBase * self, PyObject* obj) {
             if (!PyFunction_Check(obj)) {

@@ -152,7 +152,8 @@ namespace retracesoftware_stream {
 
         // PyObject * fast_lookup[5];
         PyObject * serializer;
-        
+        PyObject * enable_when;
+
         retracesoftware::FastCall thread;
 
         vectorcallfunc vectorcall;
@@ -225,7 +226,6 @@ namespace retracesoftware_stream {
 
                 // one byte
                 write_control(CreateFixedSize(FixedSizeTypes::STACK));
-                write((uint64_t)MAGIC);
 
                 // how many to discard
                 write_expected(old_size - skip);
@@ -235,20 +235,13 @@ namespace retracesoftware_stream {
                 for (auto frame : new_frame_elements) {
                     PyObject * filename = frame.code_object->co_filename;
                     
-
-                    // printf("Writing: %i:%i\n", code_objects[frame.code_object], frame.instruction);
                     write(filename_index[filename]);
                     write(frame.lineno());
-
-                    if (PyUnicode_CompareWithASCIIString(filename, "/usr/local/lib/python3.11/site-packages/certifi/__init__.py") == 0) {
-                        printf("index: %i\n", filename_index[filename]);
-                        raise(SIGTRAP);
-                    }
-
                 }
-                write((uint64_t)MAGIC);
             }
         }
+
+        void write_magic() { write((uint64_t)MAGIC); }
 
         static PyObject * StreamHandle_vectorcall(StreamHandle * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
             
@@ -259,32 +252,36 @@ namespace retracesoftware_stream {
                 return nullptr;
             }
             try {
-                writer->check_thread();
-        
-                writer->write_stacktrace();
+                if (writer->enabled()) {
+                    writer->check_thread();
+                    writer->write_stacktrace();
 
-                writer->write_handle_ref(self->index);
+                    if (writer->magic_markers) writer->write_magic();
 
-                if (writer->verbose) {
-                    PyObject * str = PyObject_Str(self->object);
-                    printf("-- %s\n", PyUnicode_AsUTF8(str));
-                    Py_DECREF(str);
-                }
+                    writer->write_handle_ref(self->index);
 
-                writer->messages_written++;
-
-                size_t total_args = PyVectorcall_NARGS(nargsf) + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0);
-
-                for (size_t i = 0; i < total_args; i++) {
-                    writer->write(args[i]);
                     if (writer->verbose) {
-                        PyObject * str = PyObject_Str(args[i]);
+                        PyObject * str = PyObject_Str(self->object);
                         printf("-- %s\n", PyUnicode_AsUTF8(str));
                         Py_DECREF(str);
                     }
-                    writer->messages_written++;
-                }
 
+                    writer->messages_written++;
+
+                    size_t total_args = PyVectorcall_NARGS(nargsf) + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0);
+
+                    for (size_t i = 0; i < total_args; i++) {
+                        if (writer->magic_markers) writer->write_magic();
+
+                        writer->write(args[i]);
+                        if (writer->verbose) {
+                            PyObject * str = PyObject_Str(args[i]);
+                            printf("-- %s\n", PyUnicode_AsUTF8(str));
+                            Py_DECREF(str);
+                        }
+                        writer->messages_written++;
+                    }
+                }
                 Py_RETURN_NONE;
 
             } catch (...) {
@@ -320,6 +317,9 @@ namespace retracesoftware_stream {
         }
 
         void write_delete(int id) {
+            if (verbose) {
+                printf("DELETE - %i, delta - %i\n", id, next_handle - id - 1);
+            }
             int delta = next_handle - id;
 
             assert (delta > 0);
@@ -1030,7 +1030,9 @@ namespace retracesoftware_stream {
             write_stacktrace();
 
             for (size_t i = 0; i < nargs; i++) {
+                if (magic_markers) write_magic();
                 write(args[i]);
+
                 if (verbose) {
                     PyObject * str = PyObject_Str(args[i]);
                     printf("written: %s\n", PyUnicode_AsUTF8(str));
@@ -1040,7 +1042,30 @@ namespace retracesoftware_stream {
             }
         }
 
+        bool enabled() {
+            if (enable_when) {
+                PyObject * result = PyObject_CallNoArgs(enable_when);
+                if (!result) throw nullptr;
+                int is_true = PyObject_IsTrue(result);
+                Py_DECREF(result);
+
+                switch(is_true) {
+                    case 1: 
+                        Py_DECREF(enable_when);
+                        enable_when = nullptr;
+                        return true;
+                    case 0:
+                        return false;
+                    default:
+                        throw nullptr;
+                }
+            }
+            return true;
+        }
+
         static PyObject* py_vectorcall(ObjectWriter* self, PyObject*const * args, size_t nargsf, PyObject* kwnames) {
+
+
             if (kwnames) {
                 PyErr_SetString(PyExc_TypeError, "ObjectWriter does not accept keyword arguments");
                 return nullptr;
@@ -1050,20 +1075,23 @@ namespace retracesoftware_stream {
                 PyErr_Format(PyExc_RuntimeError, "Cannot write to file: %S as its closed", self->path);
                 return nullptr;
             }
-            try {                
-                size_t nargs = PyVectorcall_NARGS(nargsf);
 
-                if (self->file) {
-                    self->write_all(args, nargs);
-                } else {
-                    self->file = open(self->path, true);
-                    try {
+            try {    
+                if (self->enabled()) {            
+                    size_t nargs = PyVectorcall_NARGS(nargsf);
+
+                    if (self->file) {
                         self->write_all(args, nargs);
-                        fclose(self->file);
-                        self->file = nullptr;
-                    } catch (...) {
-                        fclose(self->file);
-                        self->file = nullptr;
+                    } else {
+                        self->file = open(self->path, true);
+                        try {
+                            self->write_all(args, nargs);
+                            fclose(self->file);
+                            self->file = nullptr;
+                        } catch (...) {
+                            fclose(self->file);
+                            self->file = nullptr;
+                        }
                     }
                 }
                 Py_RETURN_NONE;
@@ -1225,6 +1253,7 @@ namespace retracesoftware_stream {
 
             int verbose = 0;
             int stacktraces = 0;
+            int magic_markers = 0;
 
             static const char* kwlist[] = {
                 "path", 
@@ -1233,15 +1262,18 @@ namespace retracesoftware_stream {
                 "verbose", 
                 "stacktraces", 
                 "normalize_path",
+                "magic_markers",
                 nullptr};  // Keywords allowed
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OppO", (char **)kwlist, &path, &serializer, &thread, &verbose, &stacktraces, &normalize_path)) {
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OppOp", (char **)kwlist, 
+                &path, &serializer, &thread, &verbose, &stacktraces, &normalize_path, &magic_markers)) {
                 return -1;  
                 // Return NULL to propagate the parsing error
             }
 
             self->verbose = verbose;
             self->stacktraces = stacktraces;
+            self->magic_markers = magic_markers;
 
             self->path = Py_NewRef(path);
             self->serializer = Py_NewRef(serializer);
@@ -1261,6 +1293,7 @@ namespace retracesoftware_stream {
             self->binding_counter = 0;
             self->filename_index_counter = 0;
             self->normalize_path = Py_XNewRef(normalize_path);
+            self->enable_when = nullptr;
 
             new (&self->bindings) map<PyObject *, int>();
             new (&self->filename_index) map<PyObject *, uint16_t>();
@@ -1332,13 +1365,15 @@ namespace retracesoftware_stream {
         }
 
         void object_freed(PyObject * obj) {
-            auto it = bindings.find(obj);
+            if (file) {
+                auto it = bindings.find(obj);
 
-            // is there an integer binding for this?
-            if (it != bindings.end()) {
-                check_thread();
-                write_unsigned_number(SizedTypes::BINDING_DELETE, it->second);
-                bindings.erase(it);
+                // is there an integer binding for this?
+                if (it != bindings.end()) {
+                    check_thread();
+                    write_unsigned_number(SizedTypes::BINDING_DELETE, it->second);
+                    bindings.erase(it);
+                }
             }
         }
 
@@ -1454,6 +1489,7 @@ namespace retracesoftware_stream {
         {"messages_written", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, messages_written), READONLY, "TODO"},
         {"verbose", T_BOOL, OFFSET_OF_MEMBER(ObjectWriter, verbose), 0, "TODO"},
         {"normalize_path", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, normalize_path), 0, "TODO"},
+        {"enable_when", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, enable_when), 0, "TODO"},
 
         // {"path", T_OBJECT, OFFSET_OF_MEMBER(Writer, path), READONLY, "TODO"},
         // {"on_pid_change", T_OBJECT_EX, OFFSET_OF_MEMBER(Writer, on_pid_change), 0, "TODO"},

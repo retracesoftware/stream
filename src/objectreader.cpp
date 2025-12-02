@@ -7,6 +7,7 @@
 #include <sys/file.h>
 #include <condition_variable>
 #include <mutex>
+#include <ranges>
 
 #include "base.h"
 
@@ -451,13 +452,15 @@ namespace retracesoftware_stream {
         }
 
         void read_delete(size_t size) {
-            if (verbose) printf("consumed DELETE\n");
+            if (verbose) printf("consumed DELETE for index: %lu, next handle: %lu\n", size, next_handle);
 
             int64_t from_end = size + 1;
             assert(from_end <= next_handle);
             uint64_t offset = next_handle - from_end;
             
             assert(lookup.contains(offset));
+            assert(lookup[offset]);
+
             Py_DECREF(lookup[offset]);
             lookup.erase(offset);
         }
@@ -618,8 +621,6 @@ namespace retracesoftware_stream {
 
         void read_stack() {
 
-            assert(_read<uint64_t>() == MAGIC);
-
             static thread_local std::vector<CodeLocation> previous;
 
             auto record = read_record_stack();
@@ -631,7 +632,6 @@ namespace retracesoftware_stream {
                 on_difference(previous, record, replay);
                 previous.clear();
             }
-            assert(_read<uint64_t>() == MAGIC);
         }
 
         void read_thread_switch() {
@@ -756,8 +756,19 @@ namespace retracesoftware_stream {
             return c;
         }
 
+        void read_magic() {
+            uint64_t magic = _read<uint64_t>();
+            if (magic != MAGIC) {
+                raise(SIGTRAP);
+                PyErr_Format(PyExc_RuntimeError, "Bad internal exception reading tracefile, next element wasnt MAGIC");
+                throw nullptr;
+            }
+        }
+
         PyObject * read_root() {
             
+            if (magic_markers) read_magic();
+
             // while (consume(control)) {
             //     control = read_control();
             // }
@@ -1046,6 +1057,7 @@ namespace retracesoftware_stream {
                 PyObject * thread = nullptr;
                 PyObject * on_stack_difference;
                 PyObject * normalize_path = nullptr;;
+                int magic_markers = 0;
 
                 int verbose = 0;
                 static const char* kwlist[] = {
@@ -1056,11 +1068,12 @@ namespace retracesoftware_stream {
                     "thread",
                     "verbose",
                     "normalize_path",
+                    "magic_markers",
                     nullptr};  // Keywords allowed
 
-                if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO|OOpO", (char **)kwlist, 
+                if (!PyArg_ParseTupleAndKeywords(args, kwds, "OOO|OOpOp", (char **)kwlist, 
                     &path, &deserializer, &on_stack_difference,
-                    &transform, &thread, &verbose, &normalize_path)) {
+                    &transform, &thread, &verbose, &normalize_path, &magic_markers)) {
                     return -1;
                     // Return NULL to propagate the parsing error
                 }
@@ -1075,7 +1088,7 @@ namespace retracesoftware_stream {
                 self->transform = transform != Py_None ? Py_XNewRef(transform) : nullptr;
                 self->verbose = verbose;
                 self->normalize_path = Py_XNewRef(normalize_path);
-
+                self->magic_markers = magic_markers;
                 self->on_stack_difference = Py_NewRef(on_stack_difference);
                 // self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectReader::py_vectorcall);
                 self->pending_reads = PyDict_New();
@@ -1190,6 +1203,14 @@ namespace retracesoftware_stream {
         //         }
         // }
 
+        static PyObject * py_close(ObjectReader *self, PyObject * unused) {
+            if (self->file) {
+                fclose(self->file);
+                self->file = nullptr;
+            }
+            Py_RETURN_NONE;
+        }
+
         static int path_setter(ObjectReader *self, PyObject *value, void *closure) {
  
             if (value == nullptr) {
@@ -1247,6 +1268,7 @@ namespace retracesoftware_stream {
         {"load_hash_secret", (PyCFunction)ObjectReader::py_load_hash_secret, METH_NOARGS, "TODO"},
         {"wake_pending", (PyCFunction)ObjectReader::py_wake_pending, METH_NOARGS, "TODO"},
         {"bind", (PyCFunction)ObjectReader::py_bind, METH_VARARGS | METH_KEYWORDS, "TODO"},
+        {"close", (PyCFunction)ObjectReader::py_close, METH_NOARGS, "TODO"},
         {"exclude_from_stacktrace", (PyCFunction)ReaderWriterBase::py_exclude_from_stacktrace, METH_O, "TODO"},
 
         // {"dump_pending", (PyCFunction)ObjectReader::py_dump_pending, METH_O, "TODO"},

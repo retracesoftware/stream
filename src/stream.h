@@ -29,7 +29,6 @@
 
 //            0xRETRACESOFTWARE
 //            123456789ABCDEF
-#define MAGIC 0x8E7BACE50F73A8E
 
 // namespace nb = nanobind;
 using namespace ankerl::unordered_dense;
