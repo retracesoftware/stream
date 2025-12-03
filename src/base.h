@@ -44,6 +44,7 @@ namespace retracesoftware_stream {
         PyObject * path;
         PyObject * normalize_path;
         bool magic_markers;
+        // int stack_stop_at;
 
         static PyObject * py_exclude_from_stacktrace(ReaderWriterBase * self, PyObject* obj) {
             if (!PyFunction_Check(obj)) {

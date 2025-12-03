@@ -1094,7 +1094,8 @@ namespace retracesoftware_stream {
                 self->pending_reads = PyDict_New();
                 self->stacktraces = nullptr;
                 self->next = nullptr;
-                
+                // self->stack_stop_at = 0;
+
                 if (thread) {
                     self->active_thread = PyObject_CallNoArgs(thread);
                     if (!self->active_thread) return -1;
@@ -1291,6 +1292,7 @@ namespace retracesoftware_stream {
         {"stacktraces", T_OBJECT, OFFSET_OF_MEMBER(ObjectReader, stacktraces), READONLY, "TODO"},
         {"active_thread", T_OBJECT, OFFSET_OF_MEMBER(ObjectReader, active_thread), READONLY, "TODO"},
         {"verbose", T_BOOL, OFFSET_OF_MEMBER(ObjectReader, verbose), 0, "TODO"},
+        // {"stack_stop_at", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectReader, stack_stop_at), 0, "TODO"},
         // {"pending_reads", T_OBJECT, OFFSET_OF_MEMBER(ObjectReader, pending_reads), READONLY, "TODO"},
         // {"path", T_OBJECT, OFFSET_OF_MEMBER(Writer, path), READONLY, "TODO"},
         // {"on_pid_change", T_OBJECT_EX, OFFSET_OF_MEMBER(Writer, on_pid_change), 0, "TODO"},

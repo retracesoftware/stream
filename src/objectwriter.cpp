@@ -1294,6 +1294,7 @@ namespace retracesoftware_stream {
             self->filename_index_counter = 0;
             self->normalize_path = Py_XNewRef(normalize_path);
             self->enable_when = nullptr;
+            // self->stack_stop_at = 0;
 
             new (&self->bindings) map<PyObject *, int>();
             new (&self->filename_index) map<PyObject *, uint16_t>();
@@ -1487,6 +1488,7 @@ namespace retracesoftware_stream {
     static PyMemberDef members[] = {
         {"bytes_written", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, bytes_written), READONLY, "TODO"},
         {"messages_written", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, messages_written), READONLY, "TODO"},
+        // {"stack_stop_at", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, stack_stop_at), 0, "TODO"},
         {"verbose", T_BOOL, OFFSET_OF_MEMBER(ObjectWriter, verbose), 0, "TODO"},
         {"normalize_path", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, normalize_path), 0, "TODO"},
         {"enable_when", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, enable_when), 0, "TODO"},
