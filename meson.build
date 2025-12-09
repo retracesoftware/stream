@@ -19,8 +19,7 @@ py.install_sources(
 
 py.extension_module(
   'retracesoftware_stream',
-  sources: [
-            'src/objectreader.cpp',
+  sources: ['src/objectreader.cpp',
             'src/objectwriter.cpp',
             'src/stack.cpp',
             'src/search.cpp',

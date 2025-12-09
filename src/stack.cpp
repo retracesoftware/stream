@@ -57,6 +57,55 @@ namespace retracesoftware_stream {
     //     return size + 1;
     // }
 
+    static std::vector<Frame> stack(const set<PyFunctionObject *> &exclude, _PyInterpreterFrame * frame) {
+        // --- Step 1: Calculate the final size required ---
+        size_t count = 0;
+        _PyInterpreterFrame * current = frame;
+        
+        // First pass to count the number of non-excluded frames
+        while (current != nullptr) {
+            if (!exclude.contains(current->f_func)) {
+                count++;
+            }
+            current = current->previous;
+        }
+
+        // --- Step 2: Allocate and populate the vector ---
+        std::vector<Frame> result_vec;
+        result_vec.reserve(count);
+        current = frame; // Reset to the starting frame
+
+        // Second pass to populate the vector
+        // This populates the vector in reverse order (deepest frames first), 
+        // matching the behavior of the original recursive solution's push_back.
+        while (current != nullptr) {
+            if (!exclude.contains(current->f_func)) {
+                // Note: Since we are iterating backward (from current frame back to main),
+                // and push_back adds to the end, the resulting vector will be ordered
+                // from the deepest frame to the outermost frame (matching the original).
+                result_vec.push_back(Frame(current->f_code, _PyInterpreterFrame_LASTI(current) * 2));
+            }
+            current = current->previous;
+        }
+
+        // Since the original recursive function was called with the outermost frame first,
+        // we need to reverse the result_vec to match the call order of the original (deepest last).
+        // The original code pushed frames in the order they were processed *during the return phase*.
+        // The recursive return phase naturally reverses the order.
+
+        // Let's assume the desired final order is from the *oldest* frame to the *newest* frame.
+        // The original code's push_back created a vector from the oldest frame to the newest.
+        // If the original order is desired: reverse the vector after population.
+        std::reverse(result_vec.begin(), result_vec.end()); 
+        // If you want the deepest frame first, you would omit std::reverse.
+        
+        return result_vec;
+    }
+
+    std::vector<Frame> stack(const set<PyFunctionObject *> &exclude) {
+        return stack(exclude, get_top_frame());
+    }
+
     static std::tuple<size_t, size_t> update_stack(set<PyFunctionObject *> &exclude, std::vector<Frame> &stack, _PyInterpreterFrame * frame) {
 
         if (frame) {

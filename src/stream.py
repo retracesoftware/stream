@@ -6,16 +6,32 @@ from retracesoftware_stream import *
 import pickle
 import inspect
 import os
-
-
+import threading
+import time
+import weakref
 
 def replace_prefix(s, old_prefix, new_prefix):
     return new_prefix + s[len(old_prefix):] if s.startswith(old_prefix) else s
 
+def call_periodically(interval, func):
+    ref = weakref.ref(func)
+    sleep = time.sleep
+
+    def run():
+        while (obj := ref()):
+            obj()
+            sleep(interval)
+
+    threading.Thread(target = run, args = (), name="Retrace flush tracefile", daemon = True).start()
+
 class writer(_stream.ObjectWriter):
 
-    def __init__(self, path, thread, verbose = False, stacktraces = False, magic_markers = False):
-
+    def __init__(self, path, thread, 
+                 flush_interval = 0.1,
+                 verbose = False, 
+                 stacktraces = False, 
+                 magic_markers = False):
+        
         cwd = os.getcwd()
 
         def normalize_path(path):
@@ -29,6 +45,7 @@ class writer(_stream.ObjectWriter):
         
         self.exclude_from_stacktrace(writer.serialize)
         self.type_serializer = {}
+        call_periodically(interval = flush_interval, func = self.flush)
     
     def __enter__(self): return self
 

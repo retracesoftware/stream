@@ -1,8 +1,6 @@
 #include "stream.h"
 #include "wireformat.h"
 
-#define MAGIC 0x8E7BACE50F73A8E
-
 // #include <frameobject.h>
 
 // void print_current_stack(void)

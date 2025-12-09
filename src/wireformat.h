@@ -69,17 +69,23 @@ namespace retracesoftware_stream {
         NEG1,
         INT64,
 
-        NEW_HANDLE,
-        REF,
+        // REF,
         
-        THREAD_SWITCH,
-        BIND,
-        // NEW_BINDING,
+        // root types?
+        
         EXT_BIND,
+
+        FixedSizeTypes__LAST__, // 7
+    };
+
+    enum RootOnlyTypes : uint8_t {
+        THREAD_SWITCH = FixedSizeTypes::FixedSizeTypes__LAST__,
+        NEW_HANDLE,
+        BIND,
         STACK,
         ADD_FILENAME,
-
-        FixedSizeTypes__LAST__, // 11
+        CHECKSUM,
+        RootOnlyTypes__LAST__,
     };
 
     union Control {
@@ -92,26 +98,60 @@ namespace retracesoftware_stream {
             FixedSizeTypes type : 4; // Upper 4 bits
         } Fixed;
         uint8_t raw;
+
+        constexpr Control(SizedTypes st, FixedSizeTypes ft) 
+            : Fixed{st, ft} {}
+
+        Control(uint8_t raw) : raw(raw) {}
+        Control() : raw(0) {}
+
+        bool operator==(const Control& other) const {
+            return this->raw == other.raw;
+        }
+        
+        bool operator!=(const Control& other) const {
+            return !(*this == other);
+        }
     };
 
-    static bool is_fixedsize(Control control) {
-        return control.Fixed.SizedTypes_FIXED_SIZE == FIXED_SIZE;
+    // static bool is_fixedsize(Control control) {
+    //     return control.Fixed.SizedTypes_FIXED_SIZE == FIXED_SIZE;
+    // }
+
+    // static SizedTypes sized_type(Control control) {
+    //     return control.Sized.type != FIXED_SIZE ? control.Sized.type : SizedTypes__LAST__;
+    // }
+
+    static constexpr Control create_fixed_size(FixedSizeTypes type) {
+        return Control(SizedTypes::FIXED_SIZE, type);
     }
 
-    static SizedTypes sized_type(Control control) {
-        return control.Sized.type != FIXED_SIZE ? control.Sized.type : SizedTypes__LAST__;
-    }
-
-    static Control create_fixed_size(FixedSizeTypes type) {
-        Control c;
-        c.Fixed.type = type;
-        c.Fixed.SizedTypes_FIXED_SIZE = FIXED_SIZE;
-        return c;
+    static constexpr Control create_fixed_size(RootOnlyTypes type) {
+        return Control(SizedTypes::FIXED_SIZE, (FixedSizeTypes)type);
     }
     
-    static FixedSizeTypes fixed_size_type(Control control) {
-        return control.Fixed.SizedTypes_FIXED_SIZE == FIXED_SIZE ? control.Fixed.type : FixedSizeTypes__LAST__;
+    constexpr Control NewHandle = create_fixed_size(RootOnlyTypes::NEW_HANDLE);
+    constexpr Control Stack = create_fixed_size(RootOnlyTypes::STACK);
+    constexpr Control ThreadSwitch = create_fixed_size(RootOnlyTypes::THREAD_SWITCH);
+    constexpr Control AddFilename = create_fixed_size(RootOnlyTypes::ADD_FILENAME);
+    constexpr Control Empty = ThreadSwitch;
+
+    constexpr Control Checksum = create_fixed_size(RootOnlyTypes::CHECKSUM);
+    constexpr Control Bind = create_fixed_size(RootOnlyTypes::BIND);
+    constexpr Control ExtBind = create_fixed_size(FixedSizeTypes::EXT_BIND);
+    // constexpr Control BindingDelete = create_fixed_size(FixedSizeTypes::);
+
+    constexpr bool is_binding_delete(Control control) {
+        return control.Sized.type == SizedTypes::BINDING_DELETE;
     }
+
+    constexpr bool is_delete(Control control) {
+        return control.Sized.type == SizedTypes::DELETE;
+    }
+
+    // static FixedSizeTypes fixed_size_type(Control control) {
+    //     return control.Fixed.SizedTypes_FIXED_SIZE == FIXED_SIZE ? control.Fixed.type : FixedSizeTypes__LAST__;
+    // }
 
     inline Control CreateFixedSize(FixedSizeTypes type) {
         Control control;
@@ -165,6 +205,49 @@ namespace retracesoftware_stream {
     // }
 
     // const char * RootTypes_Name(enum RootTypes root);
-    const char * FixedSizeTypes_Name(enum FixedSizeTypes root);
-    const char * SizedTypes_Name(enum SizedTypes root);
+    constexpr const char * FixedSizeTypes_Name(enum FixedSizeTypes root) {
+        switch (root) {
+            case FixedSizeTypes::NONE: return "NONE";
+            // case FixedSizeTypes::C_NULL: return "C_NULL";
+            case FixedSizeTypes::TRUE: return "TRUE";
+            case FixedSizeTypes::FALSE: return "FALSE";
+            // case FixedSizeTypes::REF: return "REF";
+            case FixedSizeTypes::NEG1: return "NEG1";
+            case FixedSizeTypes::INT64: return "INT64";
+            // case FixedSizeTypes::BIND: return "BIND";
+            case FixedSizeTypes::EXT_BIND: return "EXT_BIND";
+            // case FixedSizeTypes::STACK: return "STACK";
+            // case FixedSizeTypes::ADD_FILENAME: return "ADD_FILENAME";
+
+            default: return nullptr;
+        }
+    }
+
+    // const char * SizedTypes_Name(enum SizedTypes root);
+
+    constexpr const char * SizedTypes_Name(enum SizedTypes root) {
+        switch (root) {
+            case SizedTypes::BYTES: return "BYTES";
+            case SizedTypes::LIST: return "LIST";
+            case SizedTypes::DICT: return "DICT";
+            case SizedTypes::TUPLE: return "TUPLE";
+
+            case SizedTypes::STR: return "STR";
+            case SizedTypes::PICKLED: return "PICKLED";
+            case SizedTypes::UINT: return "UINT";
+            case SizedTypes::DELETE: return "DELETE";
+            
+            case SizedTypes::HANDLE: return "HANDLE";
+            case SizedTypes::BIGINT: return "BIGINT";
+            case SizedTypes::SET: return "SET";
+            case SizedTypes::FROZENSET: return "FROZENSET";
+
+            case SizedTypes::BINDING: return "BINDING";
+            case SizedTypes::BINDING_DELETE: return "BINDING_DELETE";
+            case SizedTypes::FIXED_SIZE: return "FIXED_SIZE";
+
+            default: return nullptr;
+        }
+    }
+
 }

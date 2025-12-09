@@ -20,6 +20,8 @@
 #define alloca _alloca
 #endif
 
+#define MAGIC 0x8E78ACE50F73A8E
+
 #define MODULE "retracesoftware_stream."
 
 #define OFFSET_OF_MEMBER(type, member) \
@@ -132,6 +134,7 @@ namespace retracesoftware_stream {
     PyObject * create_python_stack(std::vector<Frame> &stack);
 
     size_t update_stack(set<PyFunctionObject *> &exclude, std::vector<Frame> &stack);
+    std::vector<Frame> stack(const set<PyFunctionObject *> &exclude);
 
     extern PyTypeObject ObjectWriter_Type;
     extern PyTypeObject ObjectReader_Type;
