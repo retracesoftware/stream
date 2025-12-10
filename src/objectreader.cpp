@@ -209,6 +209,7 @@ namespace retracesoftware_stream {
             Py_RETURN_NONE;
         }
 
+        
         static PyObject* py_vectorcall(ObjectReader *self, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
 
             PyObject * thread = PyObject_CallNoArgs(self->thread);

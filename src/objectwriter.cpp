@@ -1,5 +1,6 @@
 #include "stream.h"
 #include <cstdint>
+#include <mutex>
 #include <structmember.h>
 #include "wireformat.h"
 #include <algorithm>
@@ -143,7 +144,7 @@ namespace retracesoftware_stream {
         PyObject *weakreflist;
         // std::thread flusher;
         // std::condition_variable cv;
-        std::mutex write_lock;
+        std::recursive_mutex write_lock;
         bool magic_markers;
 
         // std::thread t1(thread_function, 1);
@@ -240,7 +241,7 @@ namespace retracesoftware_stream {
             
             ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
 
-            std::lock_guard<std::mutex> lock(writer->write_lock);
+            std::lock_guard<std::recursive_mutex> lock(writer->write_lock);
 
             if (!writer->file) {
                 PyErr_Format(PyExc_RuntimeError, "Cannot write to file: %S as its closed", writer->path);
@@ -482,13 +483,8 @@ namespace retracesoftware_stream {
         }
 
         void write_bytes(PyObject * obj) {
-            size_t len = PyBytes_GET_SIZE(obj);
-            write_size(SizedTypes::BYTES, len);
-            if (len > 0) {
-                write_bytes_data(obj);
-            } else {
-                raise(SIGTRAP);
-            }
+            write_size(SizedTypes::BYTES, PyBytes_GET_SIZE(obj));
+            write_bytes_data(obj);
         }
 
         void write_dict(PyObject * obj) {
@@ -973,7 +969,7 @@ namespace retracesoftware_stream {
         }
 
         static PyObject* py_vectorcall(ObjectWriter* self, PyObject*const * args, size_t nargsf, PyObject* kwnames) {
-            std::lock_guard<std::mutex> lock(self->write_lock);
+            std::lock_guard<std::recursive_mutex> lock(self->write_lock);
 
             if (kwnames) {
                 PyErr_SetString(PyExc_TypeError, "ObjectWriter does not accept keyword arguments");
@@ -1011,7 +1007,7 @@ namespace retracesoftware_stream {
         }
 
         static PyObject * py_flush(ObjectWriter * self, PyObject* unused) {
-            std::lock_guard<std::mutex> lock(self->write_lock);
+            std::lock_guard<std::recursive_mutex> lock(self->write_lock);
             try {
                 if (self->file) fflush(self->file);
                 Py_RETURN_NONE;
@@ -1021,7 +1017,7 @@ namespace retracesoftware_stream {
         }
 
         static PyObject * py_close(ObjectWriter * self, PyObject* unused) {
-            std::lock_guard<std::mutex> lock(self->write_lock);
+            std::lock_guard<std::recursive_mutex> lock(self->write_lock);
             if (!self->file) {
                 PyErr_Format(PyExc_RuntimeError, "File %S is already closed", self->file);
                 return nullptr;
@@ -1035,7 +1031,7 @@ namespace retracesoftware_stream {
         }
 
         static PyObject * py_reopen(ObjectWriter * self, PyObject* unused) {
-            std::lock_guard<std::mutex> lock(self->write_lock);
+            std::lock_guard<std::recursive_mutex> lock(self->write_lock);
             if (self->file) {
                 PyErr_Format(PyExc_RuntimeError, "File %S is already opened", self->file);
                 return nullptr;
@@ -1108,7 +1104,7 @@ namespace retracesoftware_stream {
         // }
 
         static PyObject * py_handle(ObjectWriter * self, PyObject* obj) {
-            std::lock_guard<std::mutex> lock(self->write_lock);
+            std::lock_guard<std::recursive_mutex> lock(self->write_lock);
             try {
                 return self->handle(obj);
             } catch (...) {
@@ -1117,7 +1113,7 @@ namespace retracesoftware_stream {
         }
 
         static PyObject * py_bind(ObjectWriter * self, PyObject* obj) {
-            std::lock_guard<std::mutex> lock(self->write_lock);
+            std::lock_guard<std::recursive_mutex> lock(self->write_lock);
             try {
                 self->bind(obj, false);
                 Py_RETURN_NONE;
@@ -1127,7 +1123,7 @@ namespace retracesoftware_stream {
         }
 
         static PyObject * py_ext_bind(ObjectWriter * self, PyObject* obj) {
-            std::lock_guard<std::mutex> lock(self->write_lock);
+            std::lock_guard<std::recursive_mutex> lock(self->write_lock);
             try {
                 self->bind(obj, true);
                 Py_RETURN_NONE;
@@ -1209,7 +1205,7 @@ namespace retracesoftware_stream {
 
             new (&self->bindings) map<PyObject *, int>();
             new (&self->filename_index) map<PyObject *, uint16_t>();
-            new (&self->write_lock) std::mutex();
+            new (&self->write_lock) std::recursive_mutex();
 
             new (&self->exclude_stacktrace) set<PyFunctionObject *>();
 

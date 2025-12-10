@@ -70,7 +70,7 @@ namespace retracesoftware_stream {
         //     }
         // }
 
-        void read(uint8_t * bytes, Py_ssize_t size) {
+        void read(uint8_t * bytes, size_t size) {
             size_t read = fread(bytes, sizeof(uint8_t), size, file);
 
             if (read < size) {
@@ -95,7 +95,6 @@ namespace retracesoftware_stream {
         PyObject * read_bytes(size_t size) {
 
             if (size == 0) {
-                raise(SIGTRAP);
                 return PyBytes_FromStringAndSize(NULL, 0);
             } else {
                 auto bytes_obj = PyObjectPtr(PyBytes_FromStringAndSize(NULL, size));
@@ -267,10 +266,13 @@ namespace retracesoftware_stream {
         }
 
         void add(PyObject * element) {
-            lookup[next_index++] = element;
+            lookup[next_index++] = Py_NewRef(element);
         }
         
         void remove(int index) {
+            assert(index >= 0 && index < next_index);
+            assert(lookup.contains(index));
+
             Py_DECREF(lookup.at(index));
             lookup.erase(index);
         }
@@ -334,6 +336,8 @@ namespace retracesoftware_stream {
         }
 
         PyObject * store_handle() {
+            assert(!PyGILState_Check());
+
             retracesoftware::GILGuard guard;
 
             PyObject * ref = read();
@@ -511,6 +515,8 @@ namespace retracesoftware_stream {
         }
 
         bool is_current_thread(PyObject * thread) {
+            assert(!PyGILState_Check());
+            retracesoftware::GILGuard guard;
             switch (PyObject_RichCompareBool(active_thread, thread, Py_EQ)) {
                 case 1: return true;
                 case 0: return false;
@@ -519,11 +525,25 @@ namespace retracesoftware_stream {
         }
 
         PyThreadState * threadstate() {
+            assert(!PyGILState_Check());
             retracesoftware::GILGuard guard;
             return PyThreadState_Get();
         }
 
+        bool safe_wait(std::unique_lock<std::mutex> &lock, PyObject * thread) {
+            assert(thread);
+            assert(!PyGILState_Check());
+            // {
+            //     PyObject * s = PyObject_Str(thread);
+            //     printf("In safe wait: %s\n", PyUnicode_AsUTF8(s));
+            //     Py_DECREF(s);
+            // }
+            // retracesoftware::GILReleaseGuard guard;
+            return waiting.wait_for(lock, std::chrono::milliseconds(timeout), [this, thread]() { return is_current_thread(thread); });
+        }
+
         Control next_control(std::unique_lock<std::mutex> &lock, PyObject * thread) {
+            assert(!PyGILState_Check());
             if (!active_thread) active_thread = Py_NewRef(thread);
 
             // Q1 - ok are we the correct thread?
@@ -532,7 +552,7 @@ namespace retracesoftware_stream {
 
                 if (loaded_control == ThreadSwitch) {
                     Py_XDECREF(active_thread);
-                    active_thread = read();
+                    active_thread = Py_NewRef(safe_read());
                     loaded_control = Empty;
                 }
                 if (pending.size() > 0) {
@@ -548,8 +568,8 @@ namespace retracesoftware_stream {
                 ScopeGuard guard([this, thread] { pending.erase(thread); });
 
                 pending[thread] = threadstate();
-
-                if (waiting.wait_for(lock, std::chrono::milliseconds(timeout), [this, thread]() { return is_current_thread(thread); })) {
+                
+                if (safe_wait(lock, thread)) {
                     return consume(lock, thread);
                 } else {
                     on_timeout(pending);
@@ -584,16 +604,36 @@ namespace retracesoftware_stream {
             }
         }
 
+        PyObject * safe_read() {
+            assert(!PyGILState_Check());
+            retracesoftware::GILGuard acquire;
+            return read();
+        }
+
+        void handle_stack(PyObject * thread) {
+            retracesoftware::GILGuard guard;
+
+            Stacktrace record = read_stack(thread);
+            check_magic();
+            on_stack(thread, record);
+        }
+
+        void handle_binding_delete(Control control) {
+            retracesoftware::GILGuard guard;
+
+            size_t size = stream.read_unsigned_number(control);
+            bindings.remove(size);
+        }
+
         Control consume(std::unique_lock<std::mutex> &lock, PyObject * thread) {
+            assert(!PyGILState_Check());
+
             Control control = next_control(lock, thread);
 
             message_counter++;
 
             if (control == Stack) {
-                retracesoftware::GILGuard guard;
-                Stacktrace record = read_stack(thread);
-                check_magic();
-                on_stack(thread, record);
+                handle_stack(thread);
                 return consume(lock, thread);
             }
             else if (control == NewHandle) {
@@ -602,13 +642,11 @@ namespace retracesoftware_stream {
                 return consume(lock, thread);
             }
             else if (control == AddFilename) {
-                index2filename.add(read());
+                index2filename.add(safe_read());
                 return consume(lock, thread);
             }
             else if (is_binding_delete(control)) {
-                size_t size = stream.read_unsigned_number(control);
-                bindings.remove(size);
-                // bindings.remove_from_end(size);
+                handle_binding_delete(control);
                 return consume(lock, thread);
             }
             else if (is_delete(control)) {
@@ -619,6 +657,15 @@ namespace retracesoftware_stream {
             } else {
                 return control;
             }
+        }
+
+        PyObject * read_root(Control control) {
+            assert(!PyGILState_Check());
+
+            retracesoftware::GILGuard acquire;
+            PyObject * result = read(control);
+            check_magic();
+            return result;
         }
 
         public:
@@ -651,21 +698,22 @@ namespace retracesoftware_stream {
             Py_DECREF(active_thread);
         }
 
+        
         PyObject * next(PyObject * thread) {
 
+            // check we hold the GIL
+            assert (PyGILState_Check());
+            
+            retracesoftware::GILReleaseGuard release;
             std::unique_lock<std::mutex> lock(mtx);
-
+            
             Control control = consume(lock, thread);
 
             if (control == Bind) {
                 throw std::runtime_error("expected result but got BIND");
             }
-
-            retracesoftware::GILGuard guard;
-            PyObject * result = read(control);
-
-            check_magic();
-            return result;
+            // retracesoftware::GILGuard guard;
+            return read_root(control);
         }
 
         void set_file(FILE * file) {
@@ -681,6 +729,11 @@ namespace retracesoftware_stream {
         }
 
         void bind(PyObject * thread, PyObject * binding) {
+
+            // check we hold the GIL
+            assert (PyGILState_Check());
+            
+            retracesoftware::GILReleaseGuard release;
 
             std::unique_lock<std::mutex> lock(mtx);
 
