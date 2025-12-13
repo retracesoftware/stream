@@ -48,6 +48,24 @@
 
 namespace retracesoftware_stream {
 
+    class PyGCGuard {
+    public:
+        PyGCGuard() {
+            // Acquisition: Disable GC and save state
+            was_enabled_ = PyGC_Disable();
+        }
+
+        ~PyGCGuard() {
+            // Release: Restore GC state in the destructor
+            if (was_enabled_) {
+                PyGC_Enable();
+            }
+        }
+
+    private:
+        int was_enabled_;
+    };
+
     static FILE * open(PyObject * path) {
         PyObject * path_str = PyObject_Str(path);
         if (!path_str) throw nullptr;
@@ -195,11 +213,21 @@ namespace retracesoftware_stream {
 
         static PyObject * py_bind(ObjectReader *self, PyObject* obj) {
 
+            PyGCGuard guard;
+            
             PyObject * thread = PyObject_CallNoArgs(self->thread);
 
             try {
+                // {
+                //     PyObject * s = PyObject_Str(obj);
+                //     printf("Binding: %s\n", PyUnicode_AsUTF8(s));
+                //     Py_DECREF(s);
+                // }
+
                 self->stream.bind(thread, obj);
+                Py_DECREF(thread);
             } catch (...) {
+                Py_DECREF(thread);
                 if (PyErr_Occurred()) {
                     return nullptr;
                 } else {
@@ -208,9 +236,10 @@ namespace retracesoftware_stream {
             }
             Py_RETURN_NONE;
         }
-
         
         static PyObject* py_vectorcall(ObjectReader *self, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
+
+            PyGCGuard guard;
 
             PyObject * thread = PyObject_CallNoArgs(self->thread);
 
@@ -442,7 +471,7 @@ namespace retracesoftware_stream {
     static PyMethodDef methods[] = {
         // {"load_hash_secret", (PyCFunction)ObjectReader::py_load_hash_secret, METH_NOARGS, "TODO"},
         // {"wake_pending", (PyCFunction)ObjectReader::py_wake_pending, METH_NOARGS, "TODO"},
-        {"bind", (PyCFunction)ObjectReader::py_bind, METH_VARARGS | METH_KEYWORDS, "TODO"},
+        {"bind", (PyCFunction)ObjectReader::py_bind, METH_O, "TODO"},
         {"close", (PyCFunction)ObjectReader::py_close, METH_NOARGS, "TODO"},
         {"exclude_from_stacktrace", (PyCFunction)ReaderWriterBase::py_exclude_from_stacktrace, METH_O, "TODO"},
 

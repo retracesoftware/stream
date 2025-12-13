@@ -301,7 +301,8 @@ namespace retracesoftware_stream {
                     throw nullptr;
                 }
                 write(FixedSizeTypes::EXT_BIND);
-                write_lookup(bindings[(PyObject *)Py_TYPE(obj)]);
+                int ref = bindings[(PyObject *)Py_TYPE(obj)];
+                write_lookup(ref);
 
             } else {
                 write(Bind);
@@ -1407,6 +1408,7 @@ namespace retracesoftware_stream {
         {"bytes_written", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, bytes_written), READONLY, "TODO"},
         {"messages_written", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, messages_written), READONLY, "TODO"},
         // {"stack_stop_at", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, stack_stop_at), 0, "TODO"},
+        {"stacktraces", T_BOOL, OFFSET_OF_MEMBER(ObjectWriter, stacktraces), 0, "TODO"},
         {"verbose", T_BOOL, OFFSET_OF_MEMBER(ObjectWriter, verbose), 0, "TODO"},
         {"normalize_path", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, normalize_path), 0, "TODO"},
         {"enable_when", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, enable_when), 0, "TODO"},

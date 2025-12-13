@@ -436,6 +436,7 @@ namespace retracesoftware_stream {
                 throw nullptr;
             }
             bindings.add(instance);
+            check_magic();
         }
 
         PyObject * read_fixedsize(FixedSizeTypes type) {
