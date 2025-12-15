@@ -95,17 +95,17 @@ namespace retracesoftware_stream {
         return file;
     }
     
-    static bool equal(PyObject * a, PyObject * b) {
-        retracesoftware::GILGuard guard;
+    // static bool equal(PyObject * a, PyObject * b) {
+    //     retracesoftware::GILGuard guard;
 
-        switch (PyObject_RichCompareBool(a, b, Py_EQ)) {
-            case 0: return false;
-            case 1: return true;
-            default:
-                assert(PyErr_Occurred());
-                throw nullptr;
-        };
-    }
+    //     switch (PyObject_RichCompareBool(a, b, Py_EQ)) {
+    //         case 0: return false;
+    //         case 1: return true;
+    //         default:
+    //             assert(PyErr_Occurred());
+    //             throw nullptr;
+    //     };
+    // }
 
     struct ObjectReader : public ReaderWriterBase {
         MessageStream stream;
@@ -214,7 +214,7 @@ namespace retracesoftware_stream {
         static PyObject * py_bind(ObjectReader *self, PyObject* obj) {
 
             PyGCGuard guard;
-            
+
             PyObject * thread = PyObject_CallNoArgs(self->thread);
 
             try {

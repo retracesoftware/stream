@@ -50,7 +50,7 @@ class writer(_stream.ObjectWriter):
     def __enter__(self): return self
 
     def __exit__(self, *args):
-        self.close()
+        self.keep_open = False
 
     def serialize(self, obj):
         # TODO, could add memoize one arg for performance

@@ -106,7 +106,7 @@ namespace retracesoftware_stream {
         return stack(exclude, get_top_frame());
     }
 
-    static std::tuple<size_t, size_t> update_stack(set<PyFunctionObject *> &exclude, std::vector<Frame> &stack, _PyInterpreterFrame * frame) {
+    static std::tuple<size_t, size_t> update_stack(const set<PyFunctionObject *> &exclude, std::vector<Frame> &stack, _PyInterpreterFrame * frame) {
 
         if (frame) {
             auto [common, index] = update_stack(exclude, stack, frame->previous);
@@ -141,7 +141,7 @@ namespace retracesoftware_stream {
         }
     }
 
-    size_t update_stack(set<PyFunctionObject *> &exclude, std::vector<Frame> &stack) {
+    size_t update_stack(const set<PyFunctionObject *> &exclude, std::vector<Frame> &stack) {
         auto [common, size] = update_stack(exclude, stack, get_top_frame());
         
         while (size < stack.size()) {
@@ -149,4 +149,23 @@ namespace retracesoftware_stream {
         }
         return common;
     }
+
+    // struct Stack : public PyObject {
+
+    //     std::vector<Frame> stack;
+    //     size_t common;
+
+    //     PyObject * update() {
+
+    //         Stack * delta = reinterpret_cast<Stack *>(type->tp_alloc(StackType, 0));
+
+    //         delta->common = update_stack(..., );
+            
+    //         ...
+
+    //         return delta;
+    //     }
+    // };
+
+
 }
