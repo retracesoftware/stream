@@ -729,7 +729,7 @@ namespace retracesoftware_stream {
             stream.close();
         }
 
-        void bind(PyObject * thread, PyObject * binding) {
+        void bind(PyObject * thread, PyObject * binding, std::function<void (PyObject *)> async_consumer) {
 
             // check we hold the GIL
             assert (PyGILState_Check());
@@ -740,8 +740,32 @@ namespace retracesoftware_stream {
 
             Control control = consume(lock, thread);
 
-            if (control != Bind) {
-                throw std::runtime_error("expected BIND but got result");
+            while (control != Bind) {
+                PyObject * next = read_root(control);
+                check_magic();
+
+                try {
+                    {
+                        retracesoftware::GILGuard acquire;
+                        async_consumer(next);
+                        Py_DECREF(next);
+                    }
+                    control = consume(lock, thread);
+                } catch (...) {
+                    Py_DECREF(next);
+                    throw;
+                }
+                // if (async_consumer(next)) {
+                //     control = consume(lock, thread);
+                // } else {
+
+                //     retracesoftware::GILGuard guard;
+
+                //     PyObject * s = PyObject_Str(unexpected);
+
+                //     printf("expected BIND but got: %s\n", PyUnicode_AsUTF8(s));
+                // }
+
             }
             bindings.add(binding);
             check_magic();

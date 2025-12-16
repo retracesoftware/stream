@@ -166,28 +166,6 @@ namespace retracesoftware_stream {
             return trace;
         }
 
-        // Stacktrace read_replay_stack(std::vector<Frame>& previous) {
-        //     static thread_local std::vector<CodeLocation> locations;
-
-        //     size_t common = update_stack(exclude_stacktrace, previous);
-
-        //     while (locations.size() > common) locations.pop_back();
-
-        //     for (Frame frame : previous | std::views::drop(common)) {
-        //         CodeLocation location = frame.location();
-        //         if (normalize_path) {
-        //             if (!normalized_paths.contains(location.filename)) {
-        //                 PyObject * normalized = PyObject_CallOneArg(normalize_path, location.filename);
-        //                 if (!normalized) throw nullptr;
-        //                 normalized_paths[Py_NewRef(location.filename)] = normalized;
-        //             }
-        //             location.filename = normalized_paths[location.filename];
-        //         }
-        //         locations.push_back(location);
-        //     }
-        //     return locations;
-        // }
-
         void on_stack(PyObject * thread, const Stacktrace &record) {
             Stacktrace replay = stacktrace();
             if (record != replay) {
@@ -196,35 +174,29 @@ namespace retracesoftware_stream {
             previous_stacks[thread] = replay;
         }
 
-        // PyObject * create_stacktrace(PyObject * current_thread) {
-        //     PyObject * func = PyDict_GetItem(pending_reads, current_thread);
-
-        //     return PyCallable_Check(func) ? PyObject_CallNoArgs(func) : Py_NewRef(Py_None);
-        // 
-
-        // void set_stacktrace(PyObject * current_thread) {
-        //     assert (PyGILState_Check());
-
-        //     PyObject * trace = create_stacktrace(current_thread);
-        //     if (!trace) throw nullptr;
-        //     PyDict_SetItem(stacktraces, current_thread, trace);
-        //     Py_DECREF(trace);
-        // }
-
-        static PyObject * py_bind(ObjectReader *self, PyObject* obj) {
+        static PyObject * py_bind(ObjectReader *self, PyObject* args, PyObject* kwds) {
 
             PyGCGuard guard;
 
             PyObject * thread = PyObject_CallNoArgs(self->thread);
 
-            try {
-                // {
-                //     PyObject * s = PyObject_Str(obj);
-                //     printf("Binding: %s\n", PyUnicode_AsUTF8(s));
-                //     Py_DECREF(s);
-                // }
+            PyObject * binding;
+            PyObject * consumer;
 
-                self->stream.bind(thread, obj);
+            static const char* kwlist[] = {"consumer", "binding", nullptr};  // Keywords allowed
+
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO", (char **)kwlist, &consumer, &binding)) {
+                return nullptr;
+            }
+
+            try {
+                auto c = [consumer](PyObject * obj) {
+                    PyObject * res = PyObject_CallOneArg(consumer, obj);
+                    Py_XDECREF(res);
+                    if (!res) throw nullptr;
+                };
+
+                self->stream.bind(thread, binding, c);
                 Py_DECREF(thread);
             } catch (...) {
                 Py_DECREF(thread);
@@ -374,45 +346,9 @@ namespace retracesoftware_stream {
             Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
         }
 
-        // static PyObject * next_control_getter(ObjectReader *self, void *closure) {
-        //     if (self->next_control == -1) {
-        //         Py_RETURN_NONE;
-        //     }
-
-        //     return PyLong_FromLong(self->next_control);
-        // }
-        
         static PyObject * path_getter(ObjectReader *self, void *closure) {
             return Py_NewRef(self->path);
         }
-
-        // PyObject * stacks() {
-        //     PyObject * stack = PyObject_CallNoArgs(stacktrace);
-        //     if (!stack) return nullptr;
-        //         if (timed_out) {
-        //             PyDict_SetItem(timed_out, current_thread, stack);
-        //             Py_DECREF(stack);
-        //             wakeup.notify_all();
-        //             while(true) wakeup.wait(lock);
-                    
-        //         } else {
-        //             timed_out = PyDict_New();
-        //             PyDict_SetItem(timed_out, current_thread, stack);
-
-        //             wakeup.notify_all();
-
-        //             int total = pending_reads.size();
-
-        //             wakeup.wait(lock, [this, total]() {
-        //                 return PyDict_Size(timed_out) == total;
-        //             });
-
-        //             if (on_timeout_callback) {
-        //                 PyObject_CallFunctionObjArgs(on_timeout_callback, this, timed_out, nullptr);
-        //             }
-        //             raise(SIGTRAP);
-        //         }
-        // }
 
         static PyObject * py_close(ObjectReader *self, PyObject * unused) {
             self->stream.close();
@@ -452,39 +388,12 @@ namespace retracesoftware_stream {
             }
         }
 
-        // static PyObject * py_wake_pending(ObjectReader * self, PyObject* unused) {
-        //     self->wakeup.notify_all();
-        //     Py_RETURN_NONE;
-        // }
-
-        // static PyObject * py_load_hash_secret(ObjectReader * self, PyObject* unused) {                
-        //     try {
-        //         self->read((uint8_t *)&_Py_HashSecret, sizeof(_Py_HashSecret_t));
-        //         Py_RETURN_NONE;
-        //     } catch (...) {
-        //         return nullptr;
-        //     }
-
-        // }
     };
 
     static PyMethodDef methods[] = {
-        // {"load_hash_secret", (PyCFunction)ObjectReader::py_load_hash_secret, METH_NOARGS, "TODO"},
-        // {"wake_pending", (PyCFunction)ObjectReader::py_wake_pending, METH_NOARGS, "TODO"},
-        {"bind", (PyCFunction)ObjectReader::py_bind, METH_O, "TODO"},
+        {"bind", (PyCFunction)ObjectReader::py_bind, METH_VARARGS | METH_KEYWORDS, "TODO"},
         {"close", (PyCFunction)ObjectReader::py_close, METH_NOARGS, "TODO"},
         {"exclude_from_stacktrace", (PyCFunction)ReaderWriterBase::py_exclude_from_stacktrace, METH_O, "TODO"},
-
-        // {"dump_pending", (PyCFunction)ObjectReader::py_dump_pending, METH_O, "TODO"},
-        // {"supply", (PyCFunction)ObjectReader::py_supply, METH_O, "supply the placeholder"},
-        // {"intern", (PyCFunction)ObjectWriter::py_intern, METH_FASTCALL, "TODO"},
-        // {"replace", (PyCFunction)ObjectWriter::py_replace, METH_VARARGS | METH_KEYWORDS, "TODO"},
-        // {"unique", (PyCFunction)ObjectWriter::py_unique, METH_O, "TODO"},
-        // {"delete", (PyCFunction)ObjectWriter::py_delete, METH_O, "TODO"},
-
-        // {"tuple", (PyCFunction)ObjectWriter::py_write_tuple, METH_FASTCALL, "TODO"},
-        // // {"dict", (PyCFunction)ObjectWriter::, METH_FASTCALL | METH_KEYWORDS, "TODO"},
-
 
         {NULL}  // Sentinel
     };

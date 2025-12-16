@@ -185,7 +185,7 @@ namespace retracesoftware_stream {
         
         void write_stacktrace() {
             if (stacktraces) {
-                stream.write_stacktrace(exclude_stacktrace);
+                stream.write_stacktrace(exclude_stacktrace, normalize_path);
             }
         }
 

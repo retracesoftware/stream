@@ -405,7 +405,6 @@ namespace retracesoftware_stream {
         PyObject * serializer;
         map<PyObject *, int> bindings;
         int binding_counter = 0;
-        PyObject * normalize_path = nullptr;
         map<PyObject *, uint16_t> filename_index;
         int filename_index_counter = 0;
 
@@ -505,15 +504,10 @@ namespace retracesoftware_stream {
 
         void traverse(visitproc visit, void* arg) {
             if (serializer) visit(serializer, arg);
-            if (normalize_path) visit(normalize_path, arg);
         }
 
-        void set_normalize_path(PyObject * normalize_path) {
-            Py_XDECREF(this->normalize_path);
-            this->normalize_path = Py_XNewRef(normalize_path);
-        }
 
-        void write_stacktrace(const set<PyFunctionObject *>& exclude_stacktrace) {
+        void write_stacktrace(const set<PyFunctionObject *>& exclude_stacktrace, PyObject * normalize_path) {
 
             static thread_local std::vector<Frame> stack;
 
