@@ -1,4 +1,5 @@
 #include "stream.h"
+#include <functional>
 
 #include <internal/pycore_frame.h>
 // #define Py_BUILD_CORE
@@ -102,10 +103,115 @@ namespace retracesoftware_stream {
         return result_vec;
     }
 
+    static std::vector<Frame> stack(PyObject * exclude, _PyInterpreterFrame * frame) {
+        // --- Step 1: Calculate the final size required ---
+        size_t count = 0;
+        _PyInterpreterFrame * current = frame;
+        
+        // First pass to count the number of non-excluded frames
+        while (current != nullptr) {
+            if (!PySet_Contains(exclude, (PyObject *)current->f_func)) {
+                count++;
+            }
+            current = current->previous;
+        }
+
+        // --- Step 2: Allocate and populate the vector ---
+        std::vector<Frame> result_vec;
+        result_vec.reserve(count);
+        current = frame; // Reset to the starting frame
+
+        // Second pass to populate the vector
+        // This populates the vector in reverse order (deepest frames first), 
+        // matching the behavior of the original recursive solution's push_back.
+        while (current != nullptr) {
+            if (!PySet_Contains(exclude, (PyObject *)current->f_func)) {
+                // Note: Since we are iterating backward (from current frame back to main),
+                // and push_back adds to the end, the resulting vector will be ordered
+                // from the deepest frame to the outermost frame (matching the original).
+                result_vec.push_back(Frame(current->f_code, _PyInterpreterFrame_LASTI(current) * 2));
+            }
+            current = current->previous;
+        }
+
+        // Since the original recursive function was called with the outermost frame first,
+        // we need to reverse the result_vec to match the call order of the original (deepest last).
+        // The original code pushed frames in the order they were processed *during the return phase*.
+        // The recursive return phase naturally reverses the order.
+
+        // Let's assume the desired final order is from the *oldest* frame to the *newest* frame.
+        // The original code's push_back created a vector from the oldest frame to the newest.
+        // If the original order is desired: reverse the vector after population.
+        std::reverse(result_vec.begin(), result_vec.end()); 
+        // If you want the deepest frame first, you would omit std::reverse.
+        
+        return result_vec;
+    }
+
     std::vector<Frame> stack(const set<PyFunctionObject *> &exclude) {
         return stack(exclude, get_top_frame());
     }
 
+    static int count_frames(std::function<bool (_PyInterpreterFrame *)> pred, _PyInterpreterFrame * frame) {
+        if (!frame) return 0;
+        else {
+            int prev = count_frames(pred, frame->previous);
+            return pred(frame) ? prev + 1 : prev;
+        }
+    }
+
+    static void fill(std::function<bool (_PyInterpreterFrame *)> pred, PyObject * frames, int index, _PyInterpreterFrame * frame) {
+        if (frame) {
+            if (pred(frame)) {
+                CodeLocation l = Frame(frame->f_code, _PyInterpreterFrame_LASTI(frame) * 2).location();
+                
+                PyObject * lineno = PyLong_FromLong(l.lineno);
+                
+                if (!lineno) throw nullptr;
+                assert(l.filename);
+
+                PyList_SET_ITEM(frames, index, PyTuple_Pack(2, Py_NewRef(l.filename), lineno));
+
+                fill(pred, frames, index - 1, frame->previous);    
+            } else {
+                fill(pred, frames, index, frame->previous);
+            }
+        } else {
+            assert(index == -1);
+        }
+    }
+
+    static PyObject * stack(std::function<bool (_PyInterpreterFrame *)> pred) {
+        _PyInterpreterFrame * top = get_top_frame();
+        int count = count_frames(pred, top);
+
+        PyObject * frames = PyList_New(count);
+
+        if (count > 0 && frames) {
+            try {
+                fill(pred, frames, count - 1, top);
+            } catch (...) {
+                Py_DECREF(frames);
+                throw;
+            }
+        }
+        return frames;
+    }
+    
+    PyObject * stack(PyObject *exclude) {
+        try {
+            return stack([exclude] (_PyInterpreterFrame * frame) {
+                switch (PySet_Contains(exclude, reinterpret_cast<PyObject *>(frame->f_func))) {
+                    case 0: return true;
+                    case 1: return false;
+                    default: throw nullptr;
+                }
+            });
+        } catch (...) {
+            return nullptr;
+        }
+    }
+    
     static std::tuple<size_t, size_t> update_stack(const set<PyFunctionObject *> &exclude, std::vector<Frame> &stack, _PyInterpreterFrame * frame) {
 
         if (frame) {

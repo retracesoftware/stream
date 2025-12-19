@@ -21,9 +21,11 @@ py.extension_module(
   'retracesoftware_stream',
   sources: ['src/objectreader.cpp',
             'src/objectwriter.cpp',
+            'src/objectstream.cpp',
             'src/stack.cpp',
             'src/search.cpp',
-            'src/module.cpp'],
+            'src/module.cpp',
+            'src/demux.cpp'],
   
   install: true,
 

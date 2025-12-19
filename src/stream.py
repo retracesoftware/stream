@@ -2,6 +2,7 @@ import retracesoftware_stream as _stream
 from retracesoftware_stream import *
 # import retracesoftware.utils as utils
 # import retracesoftware.functional as functional
+import retracesoftware.functional as functional
 
 import pickle
 import inspect
@@ -45,6 +46,7 @@ class writer(_stream.ObjectWriter):
         
         self.exclude_from_stacktrace(writer.serialize)
         self.type_serializer = {}
+                
         call_periodically(interval = flush_interval, func = self.flush)
     
     def __enter__(self): return self
@@ -97,3 +99,90 @@ class reader(_stream.ObjectReader):
             return self.type_deserializer[type(obj)](obj)
         else:
             return obj
+
+bind = object()
+
+class StickyPred:
+
+    def __init__(self, pred, extract, initial):
+        self.pred = pred
+        self.extract = extract
+        self.value = initial
+
+    def __call__(self, obj):
+        if self.pred(obj):
+            self.value = self.extract(obj)
+
+        return self.value
+
+def drop(pred, source):
+    def f():
+        obj = source()
+        return f() if pred(obj) else obj
+
+    return f
+
+class Control:
+    def __init__(self, value):
+        self.value = value
+
+class Bind(Control):
+    pass
+
+class Stack(Control):
+    pass
+
+class ThreadSwitch(Control):
+    pass
+
+def per_thread(source, thread, timeout):
+
+    is_thread_switch = functional.isinstanceof(ThreadSwitch)
+    
+    key_fn = StickyPred(
+        pred = is_thread_switch,
+        extract = lambda ts: ts.value,
+        initial = thread())
+
+    demux = _stream.Demux(key_fn = key_fn, source = source, timeout = timeout)
+
+    return drop(is_thread_switch, functional.sequence(thread, demux))
+
+class reader1(_stream.ObjectStreamReader):
+
+    def __init__(self, path, magic_markers = False):
+        super().__init__(
+            path = str(path),
+            deserialize = self.deserialize,
+            bind_singleton = Bind(self.bind),
+            on_thread_switch = ThreadSwitch,
+            on_stack = Stack,
+            magic_markers = magic_markers)
+
+        self.type_deserializer = {}
+
+    def __enter__(self): return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    # def __call__(self):
+    #     return super().__call__(timeout_seconds = self.timeout_seconds,
+    #                    stacktrace = inspect.stack)
+    
+    def deserialize(self, bytes):
+        obj = pickle.loads(bytes)
+
+        if type(obj) in self.type_deserializer:
+            return self.type_deserializer[type(obj)](obj)
+        else:
+            return obj
+
+cwd = os.getcwd()
+
+def normalize_path(path):
+    return replace_prefix(path, cwd + '/', '')
+
+def stack(exclude):
+    return [(normalize_path(filename),lineno) for filename,lineno in _stream.stack(exclude)]
+

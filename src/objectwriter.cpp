@@ -106,6 +106,30 @@ namespace retracesoftware_stream {
         inline EnsureOutput& operator=(EnsureOutput&&) = delete;
     };
 
+    static thread_local bool writing = false;
+
+    class Writing {
+    private:
+        // Stores the state returned by PyGILState_Ensure()
+        bool previous;
+
+    public:
+        // Constructor: Acquires the GIL
+        Writing() : previous(writing) {
+            writing = true;
+        }
+
+        // Destructor: Releases the GIL
+        ~Writing() {
+            writing = previous;
+        }
+
+        inline Writing(const Writing&) = delete;
+        inline Writing& operator=(const Writing&) = delete;
+        inline Writing(Writing&&) = delete;
+        inline Writing& operator=(Writing&&) = delete;
+    };
+
     struct ObjectWriter : public ReaderWriterBase {
         
         MessageStream stream;
@@ -125,6 +149,7 @@ namespace retracesoftware_stream {
         // std::condition_variable cv;
         // std::recursive_mutex write_lock;
         bool magic_markers;
+
         // std::thread t1(thread_function, 1);
 
         void write_magic() { 
@@ -184,7 +209,7 @@ namespace retracesoftware_stream {
         }
         
         void write_stacktrace() {
-            if (stacktraces) {
+            if (!writing && stacktraces) {
                 stream.write_stacktrace(exclude_stacktrace, normalize_path);
             }
         }
@@ -195,6 +220,7 @@ namespace retracesoftware_stream {
             check_thread();
             write_stacktrace();
 
+            Writing w;
             stream.bind(obj, ext);
 
             write_magic();
@@ -282,6 +308,8 @@ namespace retracesoftware_stream {
             check_thread();
             write_stacktrace();
 
+            Writing w;
+
             write_root(self);
             for (size_t i = 0; i < nargs; i++) {
                 write_root(args[i]);
@@ -298,9 +326,10 @@ namespace retracesoftware_stream {
         void write_all(PyObject*const * args, size_t nargs) {
             EnsureOutput output(this);
 
-
             check_thread();
             write_stacktrace();
+
+            Writing w;
 
             for (size_t i = 0; i < nargs; i++) {
                 write_root(args[i]);

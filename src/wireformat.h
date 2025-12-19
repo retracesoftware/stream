@@ -75,18 +75,26 @@ namespace retracesoftware_stream {
         
         EXT_BIND,
 
-        FixedSizeTypes__LAST__, // 7
-    };
-
-    enum RootOnlyTypes : uint8_t {
-        THREAD_SWITCH = FixedSizeTypes::FixedSizeTypes__LAST__,
+        // root only types
+        THREAD_SWITCH,
         NEW_HANDLE,
         BIND,
         STACK,
         ADD_FILENAME,
         CHECKSUM,
-        RootOnlyTypes__LAST__,
+
+        FixedSizeTypes__LAST__, // 7
     };
+
+    // enum RootOnlyTypes : uint8_t {
+    //     THREAD_SWITCH = FixedSizeTypes::FixedSizeTypes__LAST__,
+    //     NEW_HANDLE,
+    //     BIND,
+    //     Stack,
+    //     ADD_FILENAME,
+    //     CHECKSUM,
+    //     RootOnlyTypes__LAST__,
+    // };
 
     union Control {
         struct {
@@ -125,19 +133,15 @@ namespace retracesoftware_stream {
     static constexpr Control create_fixed_size(FixedSizeTypes type) {
         return Control(SizedTypes::FIXED_SIZE, type);
     }
-
-    static constexpr Control create_fixed_size(RootOnlyTypes type) {
-        return Control(SizedTypes::FIXED_SIZE, (FixedSizeTypes)type);
-    }
     
-    constexpr Control NewHandle = create_fixed_size(RootOnlyTypes::NEW_HANDLE);
-    constexpr Control Stack = create_fixed_size(RootOnlyTypes::STACK);
-    constexpr Control ThreadSwitch = create_fixed_size(RootOnlyTypes::THREAD_SWITCH);
-    constexpr Control AddFilename = create_fixed_size(RootOnlyTypes::ADD_FILENAME);
+    constexpr Control NewHandle = create_fixed_size(FixedSizeTypes::NEW_HANDLE);
+    constexpr Control Stack = create_fixed_size(FixedSizeTypes::STACK);
+    constexpr Control ThreadSwitch = create_fixed_size(FixedSizeTypes::THREAD_SWITCH);
+    constexpr Control AddFilename = create_fixed_size(FixedSizeTypes::ADD_FILENAME);
     constexpr Control Empty = ThreadSwitch;
 
-    constexpr Control Checksum = create_fixed_size(RootOnlyTypes::CHECKSUM);
-    constexpr Control Bind = create_fixed_size(RootOnlyTypes::BIND);
+    constexpr Control Checksum = create_fixed_size(FixedSizeTypes::CHECKSUM);
+    constexpr Control Bind = create_fixed_size(FixedSizeTypes::BIND);
     constexpr Control ExtBind = create_fixed_size(FixedSizeTypes::EXT_BIND);
     // constexpr Control BindingDelete = create_fixed_size(FixedSizeTypes::);
 

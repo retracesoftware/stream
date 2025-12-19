@@ -135,10 +135,12 @@ namespace retracesoftware_stream {
 
     size_t update_stack(const set<PyFunctionObject *> &exclude, std::vector<Frame> &stack);
     std::vector<Frame> stack(const set<PyFunctionObject *> &exclude);
-
+    
     extern PyTypeObject ObjectWriter_Type;
     extern PyTypeObject ObjectReader_Type;
     extern PyTypeObject StreamHandle_Type;
+    extern PyTypeObject ObjectStream_Type;
+    extern PyTypeObject Demux_Type;
 
     // extern PyTypeObject WeakRefCallback_Type;
     // extern PyTypeObject ObjectReader_Type;
@@ -147,6 +149,7 @@ namespace retracesoftware_stream {
 
     int stacksize(_PyInterpreterFrame * frame);
     Frame * fill(Frame * data, _PyInterpreterFrame * frame);
+    PyObject * stack(PyObject *exclude);
     
     inline void generic_gc_dealloc(PyObject *self) {
 

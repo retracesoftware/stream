@@ -44,7 +44,7 @@ namespace retracesoftware_stream {
         FILE * file;
         size_t bytes_read = 0;
         int read_timeout;
-
+        
     public:
         PrimitiveStream(FILE * file, int read_timeout) : file(file), read_timeout(read_timeout) {}
         ~PrimitiveStream() { close(); }
@@ -294,6 +294,7 @@ namespace retracesoftware_stream {
         }        
     };
 
+
     class MessageStream {
         PrimitiveStream stream;
         std::function<void (PyObject *, const Stacktrace&)> on_stack;
@@ -316,7 +317,7 @@ namespace retracesoftware_stream {
         std::mutex mtx;
         map<PyObject *, PyThreadState *> pending;
         size_t message_counter = 0;
-
+        
         PyObject * read_pickled(size_t size) {
             PyObject * bytes = stream.read_bytes(size);
 
