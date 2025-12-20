@@ -1,6 +1,6 @@
 [project]
 name = "retracesoftware_stream"
-version = "0.1.25"
+version = "0.1.26"
 license = {text = "Apache-2.0"}
 dependencies = []
 #dependencies = ["retracesoftware_functional", "retracesoftware_utils"]
