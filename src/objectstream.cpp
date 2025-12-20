@@ -53,6 +53,7 @@ namespace retracesoftware_stream {
         PyObject * bind_singleton;
         PyObject * create_stack;
         PyObject * create_thread_switch;
+        bool verbose = false;
 
         static int init(ObjectStream * self, PyObject* args, PyObject* kwds) {
 
@@ -66,6 +67,7 @@ namespace retracesoftware_stream {
 
             int magic_markers = 0;
             int read_timeout = 0;
+            int verbose = 0;
 
             static const char* kwlist[] = {
                 "path", 
@@ -75,16 +77,18 @@ namespace retracesoftware_stream {
                 "on_thread_switch",
                 "read_timeout",
                 "magic_markers",
+                "verbose",
                 nullptr};  // Keywords allowed
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOKp", (char **)kwlist, 
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOKpp", (char **)kwlist, 
                 &PyUnicode_Type, &path, 
                 &create_pickled,
                 &bind_singleton,
                 &create_stack,
                 &create_thread_switch,
                 &read_timeout,
-                &magic_markers)) {
+                &magic_markers,
+                &verbose)) {
                 return -1;
             }
 
@@ -97,6 +101,7 @@ namespace retracesoftware_stream {
             self->create_stack = Py_NewRef(create_stack);
             self->create_thread_switch = Py_NewRef(create_thread_switch);
             self->read_timeout = read_timeout;
+            self->verbose = verbose;
 
             self->vectorcall = (vectorcallfunc)call;
 
@@ -552,23 +557,33 @@ namespace retracesoftware_stream {
             Control control = read_control();
 
             if (control == NewHandle) {
+                if (verbose) printf("Consumed NEW_HANDLE\n");
+
                 handles.push_back(read());
                 return consume();
             } else if (control == AddFilename) {
+                if (verbose) printf("Consumed ADD_FILENAME\n");
+
                 filenames.push_back(read());
                 return consume();
             } else if (control.Sized.type == SizedTypes::DELETE) {
+                if (verbose) printf("Consumed DELETE\n");
+
                 size_t size = read_unsigned_number(control);
                 int index = handles.size() - 1 - size;
                 Py_DECREF(handles[index]);
                 handles[index] = nullptr;
                 return consume();
             } else if (control.Sized.type == SizedTypes::BINDING_DELETE) {
+                if (verbose) printf("Consumed BINDING_DELETE\n");
+
                 size_t index = read_unsigned_number(control);
                 Py_DECREF(bindings[index]);
                 bindings.erase(index);
                 return consume();
             } else if (control == ExtBind) {                
+                if (verbose) printf("Consumed EXT_BIND\n");
+
                 bindings[binding_counter++] = read_ext_bind();
                 return consume();
             } else {
@@ -610,18 +625,38 @@ namespace retracesoftware_stream {
 
             Control control = consume();
 
-            if (control == Stack)
+            if (control == Stack) {
+                if (verbose) printf("Consumed STACK\n");
+
                 return PyObject_CallOneArg(create_stack, read_stack_delta());
+            }
+            if (control == ThreadSwitch) {
 
-            if (control == ThreadSwitch)
-                return PyObject_CallOneArg(create_thread_switch, read());
+                PyObject * thread = read();
 
+                if (verbose) {
+                    PyObject * s = PyObject_Str(thread);
+                    printf("Consumed THREAD_SWITCH(%s)\n", PyUnicode_AsUTF8(s));
+                    Py_DECREF(s);
+                }
+                return PyObject_CallOneArg(create_thread_switch, thread);
+            }
             if (control == Bind) {
+                if (verbose) printf("Read BIND\n");
+
                 pending_bind = true;
                 return Py_NewRef(bind_singleton);
             }
-                
-            return read(control);
+            else {
+                PyObject * result = read(control);
+
+                if (verbose) {
+                    PyObject * s = PyObject_Str(result);
+                    printf("Read: %s\n", PyUnicode_AsUTF8(s));
+                    Py_DECREF(s);
+                }
+                return result;
+            }
         }
 
         static PyObject * stack_getter(ObjectStream *self, void *closure) {
@@ -650,6 +685,7 @@ namespace retracesoftware_stream {
         // {"path", T_OBJECT, OFFSET_OF_MEMBER(Writer, path), READONLY, "TODO"},
         {"read_timeout", T_ULONG, OFFSET_OF_MEMBER(ObjectStream, read_timeout), 0, "TODO"},
         {"pending_bind", T_BOOL, OFFSET_OF_MEMBER(ObjectStream, pending_bind), READONLY, "TODO"},
+        {"verbose", T_BOOL, OFFSET_OF_MEMBER(ObjectStream, verbose), 0, "TODO"},
         {NULL}  /* Sentinel */
     };
 
