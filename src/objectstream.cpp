@@ -65,6 +65,7 @@ namespace retracesoftware_stream {
             PyObject * create_thread_switch;
 
             int magic_markers = 0;
+            int read_timeout = 0;
 
             static const char* kwlist[] = {
                 "path", 
@@ -72,15 +73,17 @@ namespace retracesoftware_stream {
                 "bind_singleton",
                 "on_stack",
                 "on_thread_switch",
+                "read_timeout",
                 "magic_markers",
                 nullptr};  // Keywords allowed
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOp", (char **)kwlist, 
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOKp", (char **)kwlist, 
                 &PyUnicode_Type, &path, 
                 &create_pickled,
                 &bind_singleton,
                 &create_stack,
                 &create_thread_switch,
+                &read_timeout,
                 &magic_markers)) {
                 return -1;
             }
@@ -93,6 +96,7 @@ namespace retracesoftware_stream {
             self->bind_singleton = Py_NewRef(bind_singleton);
             self->create_stack = Py_NewRef(create_stack);
             self->create_thread_switch = Py_NewRef(create_thread_switch);
+            self->read_timeout = read_timeout;
 
             self->vectorcall = (vectorcallfunc)call;
 
@@ -644,6 +648,7 @@ namespace retracesoftware_stream {
         // {"stack_stop_at", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectReader, stack_stop_at), 0, "TODO"},
         // {"pending_reads", T_OBJECT, OFFSET_OF_MEMBER(ObjectReader, pending_reads), READONLY, "TODO"},
         // {"path", T_OBJECT, OFFSET_OF_MEMBER(Writer, path), READONLY, "TODO"},
+        {"read_timeout", T_ULONG, OFFSET_OF_MEMBER(ObjectStream, read_timeout), 0, "TODO"},
         {"pending_bind", T_BOOL, OFFSET_OF_MEMBER(ObjectStream, pending_bind), READONLY, "TODO"},
         {NULL}  /* Sentinel */
     };

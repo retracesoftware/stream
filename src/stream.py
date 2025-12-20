@@ -150,13 +150,14 @@ def per_thread(source, thread, timeout):
 
 class reader1(_stream.ObjectStreamReader):
 
-    def __init__(self, path, magic_markers = False):
+    def __init__(self, path, read_timeout, magic_markers = False):
         super().__init__(
             path = str(path),
             deserialize = self.deserialize,
             bind_singleton = Bind(self.bind),
             on_thread_switch = ThreadSwitch,
             on_stack = Stack,
+            read_timeout = read_timeout,
             magic_markers = magic_markers)
 
         self.type_deserializer = {}
