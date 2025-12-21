@@ -168,44 +168,6 @@ namespace retracesoftware_stream {
             } catch (...) {
                 return nullptr;
             }
-            // std::lock_guard<std::recursive_mutex> lock(writer->write_lock);
-
-            // if (!writer->file) {
-            //     PyErr_Format(PyExc_RuntimeError, "Cannot write to file: %S as its closed", writer->path);
-            //     return nullptr;
-            // }
-            // try {
-            //     if (writer->enabled()) {
-            //         writer->check_thread();
-            //         writer->write_stacktrace();
-
-            //         writer->write_root_handle_ref(self->index);
-                    
-            //         if (writer->verbose) {
-            //             PyObject * str = PyObject_Str(self->object);
-            //             printf("-- %s\n", PyUnicode_AsUTF8(str));
-            //             Py_DECREF(str);
-            //         }
-
-            //         writer->messages_written++;
-
-            //         size_t total_args = PyVectorcall_NARGS(nargsf) + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0);
-
-            //         for (size_t i = 0; i < total_args; i++) {
-            //             writer->write_root(args[i]);
-            //             if (writer->verbose) {
-            //                 PyObject * str = PyObject_Str(args[i]);
-            //                 printf("-- %s\n", PyUnicode_AsUTF8(str));
-            //                 Py_DECREF(str);
-            //             }
-            //             writer->messages_written++;
-            //         }
-            //     }
-            //     Py_RETURN_NONE;
-
-            // } catch (...) {
-            //     return nullptr;
-            // }
         }
         
         void write_stacktrace() {

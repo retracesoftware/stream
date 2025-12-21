@@ -129,13 +129,23 @@ class Control:
 class Bind(Control):
     pass
 
+class StackDelta:
+    __slots__ = ['to_drop', 'new_frames']
+
+    def __init__(self, to_drop, new_frames):
+        self.to_drop = to_drop
+        self.new_frames = new_frames
+
 class Stack(Control):
     pass
 
 class ThreadSwitch(Control):
     pass
 
+
 def per_thread(source, thread, timeout):
+
+    stacks = {}
 
     is_thread_switch = functional.isinstanceof(ThreadSwitch)
     
@@ -146,7 +156,19 @@ def per_thread(source, thread, timeout):
 
     demux = _stream.Demux(key_fn = key_fn, source = source, timeout = timeout)
 
-    return drop(is_thread_switch, functional.sequence(thread, demux))
+    is_stack_delta = functional.isinstanceof(StackDelta)
+
+    def create_stack(stack_delta):
+        prev = stacks.get(thread(), [])
+
+        common = prev[:-stack_delta.to_drop] if stack_delta.to_drop > 0 else prev
+        stack = common + stack_delta.new_frames
+        stacks[thread()] = stack
+        return Stack(stack)
+
+    expand_stack = functional.if_then_else(is_stack_delta, create_stack, functional.identity)
+
+    return drop(is_thread_switch, functional.sequence(thread, demux, expand_stack))
 
 class reader1(_stream.ObjectStreamReader):
 
@@ -156,7 +178,7 @@ class reader1(_stream.ObjectStreamReader):
             deserialize = self.deserialize,
             bind_singleton = Bind(self.bind),
             on_thread_switch = ThreadSwitch,
-            on_stack = Stack,
+            create_stack_delta = StackDelta,
             read_timeout = read_timeout,
             verbose = verbose,
             magic_markers = magic_markers)

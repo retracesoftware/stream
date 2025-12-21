@@ -52,18 +52,16 @@ namespace retracesoftware_stream {
         PyObject * create_pickled = nullptr;
 
         PyObject * bind_singleton;
-        PyObject * create_stack;
+        PyObject * create_stack_delta;
         PyObject * create_thread_switch;
         bool verbose = false;
 
         static int init(ObjectStream * self, PyObject* args, PyObject* kwds) {
-
-            PyDict_SetItem(PyThreadState_GetDict(), self, PyList_New(0));
             
             PyObject * path;
             PyObject * create_pickled;
             PyObject * bind_singleton;
-            PyObject * create_stack;
+            PyObject * create_stack_delta;
             PyObject * create_thread_switch;
 
             int magic_markers = 0;
@@ -74,7 +72,7 @@ namespace retracesoftware_stream {
                 "path", 
                 "deserialize",
                 "bind_singleton",
-                "on_stack",
+                "create_stack_delta",
                 "on_thread_switch",
                 "read_timeout",
                 "magic_markers",
@@ -85,7 +83,7 @@ namespace retracesoftware_stream {
                 &PyUnicode_Type, &path, 
                 &create_pickled,
                 &bind_singleton,
-                &create_stack,
+                &create_stack_delta,
                 &create_thread_switch,
                 &read_timeout,
                 &magic_markers,
@@ -99,7 +97,7 @@ namespace retracesoftware_stream {
 
             self->create_pickled = Py_NewRef(create_pickled);
             self->bind_singleton = Py_NewRef(bind_singleton);
-            self->create_stack = Py_NewRef(create_stack);
+            self->create_stack_delta = Py_NewRef(create_stack_delta);
             self->create_thread_switch = Py_NewRef(create_thread_switch);
             self->read_timeout = read_timeout;
             self->verbose = verbose;
@@ -142,7 +140,7 @@ namespace retracesoftware_stream {
         static int traverse(ObjectStream* self, visitproc visit, void* arg) {
             Py_VISIT(self->create_pickled);
             Py_VISIT(self->bind_singleton);
-            Py_VISIT(self->create_stack);
+            Py_VISIT(self->create_stack_delta);
             Py_VISIT(self->create_thread_switch);
 
             return 0;
@@ -162,7 +160,7 @@ namespace retracesoftware_stream {
 
             Py_CLEAR(self->create_pickled);
             Py_CLEAR(self->bind_singleton);
-            Py_CLEAR(self->create_stack);
+            Py_CLEAR(self->create_stack_delta);
             Py_CLEAR(self->create_thread_switch);
 
             return 0;
@@ -451,41 +449,29 @@ namespace retracesoftware_stream {
             return i == 255 ? read<uint64_t>() : (uint64_t)i;
         }
 
-        PyObject * stack() {
-            PyObject * thread_dict = PyThreadState_GetDict();
-            PyObject * stack = PyDict_GetItem(thread_dict, this);
-
-            return Py_NewRef(stack ? stack : Py_None);
-        }
-
         PyObject * read_stack_delta() {
 
-            int to_drop = read_expected_int();
-            int to_insert = read_expected_int();
+            int size = read_expected_int();
+            
+            PyObject * stack = PyList_New(size);
 
-            PyObject * thread_dict = PyThreadState_GetDict();
-
-            PyObject * old_stack = PyDict_GetItem(thread_dict, this);
-
-            size_t common = PyList_Size(old_stack) - to_drop;
-
-            PyObject * new_stack = PyList_New(common + to_insert);
-
-            for (size_t i = 0; i < common; i++) {
-                PyList_SET_ITEM(new_stack, i, Py_NewRef(PyList_GET_ITEM(old_stack, i)));
-            }
-
-            for (size_t i = common; i < common + to_insert; i++) {
+            for (size_t i = 0; i < size; i++) {
                 PyObject * filename = filenames[read<uint16_t>()];
-                PyObject * lineno = PyLong_FromLong(read<uint16_t>());
+
+                int l = read<uint16_t>();
+
+                if (verbose) {
+                    printf("  %s:%i\n", PyUnicode_AsUTF8(filename), l);
+                }
+
+                PyObject * lineno = PyLong_FromLong(l);
 
                 PyObject * frame = PyTuple_Pack(2, filename, lineno);
                 Py_DECREF(lineno);
 
-                PyList_SET_ITEM(new_stack, i, frame);
+                PyList_SET_ITEM(stack, i, frame);
             }
-            PyDict_SetItem(thread_dict, this, new_stack);
-            return new_stack;
+            return stack;
         }
 
         PyObject * read_fixedsize(FixedSizeTypes type) {
@@ -518,7 +504,7 @@ namespace retracesoftware_stream {
                     } else {
                         PyErr_Format(PyExc_RuntimeError, "Unknown subtype: %i for FixedSized", type);
                     }
-                    return nullptr;
+                    throw nullptr;
             };
         }
 
@@ -558,19 +544,19 @@ namespace retracesoftware_stream {
             Control control = read_control();
             
             if (control == NewHandle) {
-                if (verbose) printf("Retrace - ObjectStream[%i] - Consumed NEW_HANDLE\n", messages_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu] - Consumed NEW_HANDLE\n", messages_read);
 
                 handles.push_back(read());
                 messages_read++;
                 return consume();
             } else if (control == AddFilename) {
-                if (verbose) printf("Retrace - ObjectStream[%i] - Consumed ADD_FILENAME\n", messages_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu] - Consumed ADD_FILENAME\n", messages_read);
 
                 filenames.push_back(read());
                 messages_read++;
                 return consume();
             } else if (control.Sized.type == SizedTypes::DELETE) {
-                if (verbose) printf("Retrace - ObjectStream[%i] - Consumed DELETE\n", messages_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu] - Consumed DELETE\n", messages_read);
 
                 size_t size = read_unsigned_number(control);
                 int index = handles.size() - 1 - size;
@@ -579,7 +565,7 @@ namespace retracesoftware_stream {
                 messages_read++;
                 return consume();
             } else if (control.Sized.type == SizedTypes::BINDING_DELETE) {
-                if (verbose) printf("Retrace - ObjectStream[%i] - Consumed BINDING_DELETE\n", messages_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu] - Consumed BINDING_DELETE\n", messages_read);
 
                 size_t index = read_unsigned_number(control);
                 Py_DECREF(bindings[index]);
@@ -587,7 +573,7 @@ namespace retracesoftware_stream {
                 messages_read++;
                 return consume();
             } else if (control == ExtBind) {                
-                if (verbose) printf("Retrace - ObjectStream[%i] - Consumed EXT_BIND\n", messages_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu] - Consumed EXT_BIND\n", messages_read);
 
                 bindings[binding_counter++] = read_ext_bind();
                 messages_read++;
@@ -632,10 +618,21 @@ namespace retracesoftware_stream {
             Control control = consume();
 
             if (control == Stack) {
-                if (verbose) printf("Retrace - ObjectStream[%i] - Consumed STACK\n", messages_read);
+                int to_drop = read_expected_int();
+
+                if (verbose) {
+                    printf("Retrace - ObjectStream[%lu] - Consumed STACK - drop: %i\n", messages_read, to_drop);
+                }
+
+                PyObject * stack_delta = read_stack_delta();
+
                 messages_read++;
 
-                return PyObject_CallOneArg(create_stack, read_stack_delta());
+                PyObject * py_to_drop = PyLong_FromLong(to_drop);
+                PyObject * result = PyObject_CallFunctionObjArgs(create_stack_delta, py_to_drop, stack_delta, nullptr);
+                Py_DECREF(py_to_drop);
+                Py_DECREF(stack_delta);
+                return result;
             }
             if (control == ThreadSwitch) {
 
@@ -643,14 +640,16 @@ namespace retracesoftware_stream {
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(thread);
-                    printf("Retrace - ObjectStream[%i] - Consumed THREAD_SWITCH(%s)\n", messages_read, PyUnicode_AsUTF8(s));
+                    printf("Retrace - ObjectStream[%lu] - Consumed THREAD_SWITCH(%s)\n", messages_read, PyUnicode_AsUTF8(s));
                     Py_DECREF(s);
                 }
                 messages_read++;
-                return PyObject_CallOneArg(create_thread_switch, thread);
+                PyObject * result = PyObject_CallOneArg(create_thread_switch, thread);
+                Py_DECREF(thread);
+                return result;
             }
             if (control == Bind) {
-                if (verbose) printf("Retrace - ObjectStream[%i] - Read BIND\n", messages_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu] - Read BIND\n", messages_read);
 
                 pending_bind = true;
                 messages_read++;
@@ -661,16 +660,12 @@ namespace retracesoftware_stream {
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(result);
-                    printf("Retrace - ObjectStream[%i] - Read: %s\n", messages_read, PyUnicode_AsUTF8(s));
+                    printf("Retrace - ObjectStream[%lu] - Read: %s\n", messages_read, PyUnicode_AsUTF8(s));
                     Py_DECREF(s);
                 }
                 messages_read++;
                 return result;
             }
-        }
-
-        static PyObject * stack_getter(ObjectStream *self, void *closure) {
-            return self->stack();
         }
 
         static PyObject* call(ObjectStream *self, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
@@ -702,7 +697,6 @@ namespace retracesoftware_stream {
     };
 
     static PyGetSetDef getset[] = {
-        {"stack", (getter)ObjectStream::stack_getter, nullptr, "TODO", NULL},
         // {"next_control", (getter)ObjectReader::next_control_getter, nullptr, "TODO", NULL},
         // {"next_control", (getter)ObjectReader::next_control_getter, nullptr, "TODO", NULL},
         // {"pending", (getter)ObjectReader::pending_getter, nullptr, "TODO", NULL},
