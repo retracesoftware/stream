@@ -18,6 +18,22 @@
 
 using namespace ankerl::unordered_dense;
 
+#ifdef _WIN32
+    #include <process.h>
+    #include <windows.h>
+    #define getpid _getpid
+#else
+    #include <unistd.h>
+#endif
+
+int pid() {
+#ifdef _WIN32
+    return static_cast<int>(GetCurrentProcessId());
+#else
+    return static_cast<int>(getpid());
+#endif
+}
+
 namespace retracesoftware_stream {
 
     struct ObjectWriter;
@@ -135,7 +151,7 @@ namespace retracesoftware_stream {
         MessageStream stream;
 
         // size_t bytes_written;
-        size_t messages_written;
+        size_t messages_written = 0;
         int next_handle;
         PyThreadState * last_thread_state = nullptr;
         bool stacktraces;
@@ -158,6 +174,10 @@ namespace retracesoftware_stream {
             }
         }
 
+        void debug_prefix() {
+            printf("Retrace(%i) - ObjectWriter[%lu, %lu] -- ", ::pid(), messages_written, stream.get_bytes_written());
+        }
+
         static PyObject * StreamHandle_vectorcall(StreamHandle * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
             
             ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
@@ -172,7 +192,12 @@ namespace retracesoftware_stream {
         
         void write_stacktrace() {
             if (!writing && stacktraces) {
+                if (verbose) {
+                    debug_prefix();
+                    printf("STACKTRACE\n");
+                }
                 stream.write_stacktrace(exclude_stacktrace, normalize_path);
+                messages_written++;
             }
         }
 
@@ -183,8 +208,15 @@ namespace retracesoftware_stream {
             write_stacktrace();
 
             Writing w;
-            stream.bind(obj, ext);
 
+            if (verbose) {
+                debug_prefix();
+                const char * type = ext ? "EXT_BIND" : "BIND";
+                printf("%s(%s)\n", type, Py_TYPE(obj)->tp_name);
+            }
+
+            stream.bind(obj, ext);
+            messages_written++;
             write_magic();
         }
 
@@ -192,18 +224,21 @@ namespace retracesoftware_stream {
             EnsureOutput output(this);
 
             if (verbose) {
-                printf("DELETE - %i, delta - %i\n", id, next_handle - id - 1);
+                debug_prefix();
+                printf("DELETE(%i)\n", id);
             }
             int delta = next_handle - id;
 
             assert (delta > 0);
 
             stream.write_handle_delete(delta - 1);
+            messages_written++;
         }
 
         static void StreamHandle_dealloc(StreamHandle* self) {
             
-            reinterpret_cast<ObjectWriter *>(self->writer)->write_delete(self->index);
+            ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
+            writer->write_delete(self->index);
 
             PyObject_GC_UnTrack(self);
             StreamHandle::clear(self);
@@ -227,40 +262,46 @@ namespace retracesoftware_stream {
             stream.write_new_handle(obj);
 
             if (verbose) {
+                debug_prefix();
                 PyObject * str = PyObject_Str(obj);
-                printf("-- %s\n", PyUnicode_AsUTF8(str));
+                printf("NEW_HANDLE(%s)\n", PyUnicode_AsUTF8(str));
                 Py_DECREF(str);
             }
-            // messages_written++;
+            messages_written++;
             return stream_handle(next_handle++, verbose ? obj : nullptr);
         }
 
         inline size_t get_bytes_written() const { return stream.get_bytes_written(); }
 
-        // void operator()(const char * cstr) {
-        //     int size = strlen(cstr) + 1;
-
-        //     write_size(SizedTypes::STR, size);
-        //     write((const uint8_t *)cstr, size);
-        // }
-
-        // inline void operator()(RootTypes root) {
-        //     write((uint8_t)root);
-        // }
-
-        // void write_root_handle_ref(int handle) {
-        //     write_handle_ref(handle);
-        //     write_magic();
-        // }
+        void write_root(StreamHandle * obj) {
+            if (verbose) {
+                debug_prefix();
+                PyObject * str = PyObject_Str(obj->object);
+                printf("%s\n", PyUnicode_AsUTF8(str));
+                Py_DECREF(str);
+            }
+            stream.write_stream_handle(obj);
+            write_magic();
+            messages_written++;
+        }
 
         void write_root(PyObject * obj) {
+            if (verbose) {
+                debug_prefix();
+                PyObject * str = PyObject_Str(obj);
+                printf("%s\n", PyUnicode_AsUTF8(str));
+                Py_DECREF(str);
+            }
             stream.write(obj);
             write_magic();
+            messages_written++;
         }
 
         void object_freed(PyObject * obj) {
             EnsureOutput output(this);
-            stream.object_freed(obj);
+            if (stream.object_freed(obj)) {
+                messages_written++;
+            }
         }
 
         void write_all(StreamHandle * self, PyObject *const * args, size_t nargs) {
@@ -536,7 +577,13 @@ namespace retracesoftware_stream {
                     PyDict_SetItem(PyThreadState_GetDict(), this, thread_handle);
                     Py_DECREF(thread_handle);
                 }
+                if (verbose) {
+                    PyObject * str = PyObject_Str(reinterpret_cast<StreamHandle *>(thread_handle)->object);
+                    printf("Retrace - ObjectWriter[%lu] -- THREAD_SWITCH(%s)\n", messages_written, PyUnicode_AsUTF8(str));
+                    Py_DECREF(str);
+                }
                 stream.write_thread_switch(thread_handle);
+                messages_written++;
             }
         }
 

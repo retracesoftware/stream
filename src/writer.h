@@ -411,20 +411,6 @@ namespace retracesoftware_stream {
         // PyThreadState * last_thread_state = nullptr;
         // retracesoftware::FastCall thread;
 
-        void write_stream_handle(PyObject * obj) {
-            // assert (Py_TYPE(obj) == &StreamHandle_Type);
-
-            // StreamHandle * handle = reinterpret_cast<StreamHandle *>(obj);
-
-            stream.write_handle_ref(StreamHandle_index(obj));
-
-            // if (verbose) {
-            //     PyObject * str = PyObject_Str(handle->object);
-            //     printf("-- %s\n", PyUnicode_AsUTF8(str));
-            //     Py_DECREF(str);
-            // }
-        }
-
         void write_dict(PyObject * obj) {
             assert(PyDict_Check(obj));
 
@@ -565,6 +551,11 @@ namespace retracesoftware_stream {
             write(obj);
         }
 
+        void write_stream_handle(PyObject * obj) {
+            assert (Py_TYPE(obj) == &StreamHandle_Type);
+            stream.write_handle_ref(StreamHandle_index(obj));
+        }
+
         void write(PyObject * obj) {
                         
             assert(obj);
@@ -617,17 +608,17 @@ namespace retracesoftware_stream {
             // write_magic();
         }
 
-        void object_freed(PyObject * obj) {
-            // if (file) {
-                auto it = bindings.find(obj);
+        bool object_freed(PyObject * obj) {
+            auto it = bindings.find(obj);
 
-                // is there an integer binding for this?
-                if (it != bindings.end()) {
-                    // check_thread();
-                    stream.write_unsigned_number(SizedTypes::BINDING_DELETE, it->second);
-                    bindings.erase(it);
-                }
-            // }
+            // is there an integer binding for this?
+            if (it != bindings.end()) {
+                // check_thread();
+                stream.write_unsigned_number(SizedTypes::BINDING_DELETE, it->second);
+                bindings.erase(it);
+                return true;
+            }
+            return false;
         }
 
         void write_magic() { 
