@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump-type:
+        description: 'Version part to bump (patch, minor, major)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  # 1. Run the Shared Build & Tag logic
+  # Replace 'your-org/shared-repo' with your actual central repository path
+  call-shared-builder:
+    uses: retracesoftware/.github/.github/workflows/release.yml@main
+    with:
+      package_name: "retracesoftware_functional"
+      bump_type: ${{ github.event.inputs.bump-type }}
+    secrets:
+      RETRACE_APP_ID: ${{ secrets.RETRACE_APP_ID }}
+      RETRACE_PRIVATE_KEY: ${{ secrets.RETRACE_PRIVATE_KEY }}
+
+  # 2. Publish to PyPI (Must be in the caller for Trusted Publishing)
+  publish-pypi:
+    needs: call-shared-builder
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # Required for OIDC/Trusted Publishing
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "*-wheels"
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

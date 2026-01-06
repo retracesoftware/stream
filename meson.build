@@ -1,5 +1,9 @@
 # meson.build
-project('retracesoftware_stream', 'cpp', default_options: ['cpp_std=c++20'])
+project(
+  'retracesoftware_stream', 
+  'cpp',
+  version: '0.2.0',
+  default_options: ['cpp_std=c++20'])
 
 # Bind to the interpreter Meson/meson-python wants us to use.
 py = import('python').find_installation()
