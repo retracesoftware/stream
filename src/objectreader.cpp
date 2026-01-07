@@ -295,7 +295,7 @@ namespace retracesoftware_stream {
                 self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectReader::py_vectorcall);
                 // self->pending_reads = PyDict_New();
                 // self->stacktraces = nullptr;
-                new (&self->exclude_stacktrace) set<PyFunctionObject *>();
+                new (&self->exclude_stacktrace) set<PyObject *>();
                 new (&self->normalized_paths) map<PyObject *, PyObject *>();
                 new (&self->previous_stacks) map<PyObject *, Stacktrace>();
 

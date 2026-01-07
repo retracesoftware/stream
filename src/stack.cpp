@@ -5,6 +5,16 @@
 // #define Py_BUILD_CORE
 // #include <internal/pycore_opcode.h>
 
+#if PY_VERSION_HEX >= 0x030C0000  // Python 3.12 or higher
+static PyObject * get_func(_PyInterpreterFrame * frame) {
+    return frame->f_funcobj;
+}
+#else
+static PyObject * get_func(_PyInterpreterFrame * frame) {
+    return (PyObject *)frame->f_func;
+}
+#endif
+
 namespace retracesoftware_stream {
 
     // int _PyInterpreterFrame_GetLine(_PyInterpreterFrame *frame)
@@ -58,14 +68,14 @@ namespace retracesoftware_stream {
     //     return size + 1;
     // }
 
-    static std::vector<Frame> stack(const set<PyFunctionObject *> &exclude, _PyInterpreterFrame * frame) {
+    static std::vector<Frame> stack(const set<PyObject *> &exclude, _PyInterpreterFrame * frame) {
         // --- Step 1: Calculate the final size required ---
         size_t count = 0;
         _PyInterpreterFrame * current = frame;
         
         // First pass to count the number of non-excluded frames
         while (current != nullptr) {
-            if (!exclude.contains(current->f_func)) {
+            if (!exclude.contains(get_func(current))) {
                 count++;
             }
             current = current->previous;
@@ -80,7 +90,7 @@ namespace retracesoftware_stream {
         // This populates the vector in reverse order (deepest frames first), 
         // matching the behavior of the original recursive solution's push_back.
         while (current != nullptr) {
-            if (!exclude.contains(current->f_func)) {
+            if (!exclude.contains(get_func(current))) {
                 // Note: Since we are iterating backward (from current frame back to main),
                 // and push_back adds to the end, the resulting vector will be ordered
                 // from the deepest frame to the outermost frame (matching the original).
@@ -110,7 +120,7 @@ namespace retracesoftware_stream {
         
         // First pass to count the number of non-excluded frames
         while (current != nullptr) {
-            if (!PySet_Contains(exclude, (PyObject *)current->f_func)) {
+            if (!PySet_Contains(exclude, get_func(current))) {
                 count++;
             }
             current = current->previous;
@@ -125,7 +135,7 @@ namespace retracesoftware_stream {
         // This populates the vector in reverse order (deepest frames first), 
         // matching the behavior of the original recursive solution's push_back.
         while (current != nullptr) {
-            if (!PySet_Contains(exclude, (PyObject *)current->f_func)) {
+            if (!PySet_Contains(exclude, get_func(current))) {
                 // Note: Since we are iterating backward (from current frame back to main),
                 // and push_back adds to the end, the resulting vector will be ordered
                 // from the deepest frame to the outermost frame (matching the original).
@@ -148,7 +158,7 @@ namespace retracesoftware_stream {
         return result_vec;
     }
 
-    std::vector<Frame> stack(const set<PyFunctionObject *> &exclude) {
+    std::vector<Frame> stack(const set<PyObject *> &exclude) {
         return stack(exclude, get_top_frame());
     }
 
@@ -201,7 +211,7 @@ namespace retracesoftware_stream {
     PyObject * stack(PyObject *exclude) {
         try {
             return stack([exclude] (_PyInterpreterFrame * frame) {
-                switch (PySet_Contains(exclude, reinterpret_cast<PyObject *>(frame->f_func))) {
+                switch (PySet_Contains(exclude, get_func(frame))) {
                     case 0: return true;
                     case 1: return false;
                     default: throw nullptr;
@@ -212,16 +222,16 @@ namespace retracesoftware_stream {
         }
     }
     
-    static std::tuple<size_t, size_t> update_stack(const set<PyFunctionObject *> &exclude, std::vector<Frame> &stack, _PyInterpreterFrame * frame) {
+    static std::tuple<size_t, size_t> update_stack(const set<PyObject *> &exclude, std::vector<Frame> &stack, _PyInterpreterFrame * frame) {
 
         if (frame) {
             auto [common, index] = update_stack(exclude, stack, frame->previous);
 
-            if (exclude.contains(frame->f_func)) {
+            if (exclude.contains(get_func(frame))) {
                 return {common, index};
             }
 
-            assert(frame->f_func);
+            assert(get_func(frame));
             
             // if (instr_size(frame->prev_instr) > 1) {
             //     raise(SIGTRAP);
@@ -247,7 +257,7 @@ namespace retracesoftware_stream {
         }
     }
 
-    size_t update_stack(const set<PyFunctionObject *> &exclude, std::vector<Frame> &stack) {
+    size_t update_stack(const set<PyObject *> &exclude, std::vector<Frame> &stack) {
         auto [common, size] = update_stack(exclude, stack, get_top_frame());
         
         while (size < stack.size()) {

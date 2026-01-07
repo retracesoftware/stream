@@ -37,7 +37,7 @@
 namespace retracesoftware_stream {
 
     struct ReaderWriterBase : public PyObject {
-        set<PyFunctionObject *> exclude_stacktrace;
+        set<PyObject *> exclude_stacktrace;
         int filename_index_counter;
         PyObject * path;
         PyObject * normalize_path;
@@ -50,8 +50,8 @@ namespace retracesoftware_stream {
                 return nullptr;
             }
             
-            if (!self->exclude_stacktrace.contains((PyFunctionObject *)obj)) {
-                self->exclude_stacktrace.insert((PyFunctionObject *)Py_NewRef(obj));
+            if (!self->exclude_stacktrace.contains(obj)) {
+                self->exclude_stacktrace.insert(Py_NewRef(obj));
             }
             Py_RETURN_NONE;
         }

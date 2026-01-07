@@ -538,7 +538,7 @@ namespace retracesoftware_stream {
             // new (&self->placeholders) map<PyObject *, uint64_t>();
             // new (&self->type_serializers) map<PyTypeObject *, retracesoftware::FastCall>();
 
-            new (&self->exclude_stacktrace) set<PyFunctionObject *>();
+            new (&self->exclude_stacktrace) set<PyObject *>();
             self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectWriter::py_vectorcall);
             // self->last_thread_state = PyThreadState_Get();
 

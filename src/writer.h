@@ -493,7 +493,7 @@ namespace retracesoftware_stream {
         }
 
 
-        void write_stacktrace(const set<PyFunctionObject *>& exclude_stacktrace, PyObject * normalize_path) {
+        void write_stacktrace(const set<PyObject *>& exclude_stacktrace, PyObject * normalize_path) {
 
             static thread_local std::vector<Frame> stack;
 

@@ -133,8 +133,8 @@ namespace retracesoftware_stream {
 
     PyObject * create_python_stack(std::vector<Frame> &stack);
 
-    size_t update_stack(const set<PyFunctionObject *> &exclude, std::vector<Frame> &stack);
-    std::vector<Frame> stack(const set<PyFunctionObject *> &exclude);
+    size_t update_stack(const set<PyObject *> &exclude, std::vector<Frame> &stack);
+    std::vector<Frame> stack(const set<PyObject *> &exclude);
     
     extern PyTypeObject ObjectWriter_Type;
     extern PyTypeObject ObjectReader_Type;
