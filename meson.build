@@ -2,7 +2,7 @@
 project(
   'retracesoftware_stream', 
   'cpp',
-  version: '0.2.8',
+  version: '0.2.9',
   default_options: ['cpp_std=c++20'])
 
 # Bind to the interpreter Meson/meson-python wants us to use.
