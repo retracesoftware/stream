@@ -21,8 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
-dependencies = []
-#dependencies = ["retracesoftware_functional", "retracesoftware_utils"]
+dependencies = ["retracesoftware.functional", "retracesoftware.utils"]
 
 [build-system]
 requires = ["meson-python>=0.15.0", "meson>=1.10", "ninja"]
