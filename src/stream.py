@@ -215,9 +215,6 @@ class reader1(_stream.ObjectStreamReader):
 
 cwd = os.getcwd()
 
-def normalize_path(path):
-    return replace_prefix(path, cwd + '/', '')
-
 def stack(exclude):
     return [(normalize_path(filename),lineno) for filename,lineno in _stream.stack(exclude)]
 
