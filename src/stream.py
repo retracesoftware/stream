@@ -10,6 +10,10 @@ import os
 import threading
 import time
 import weakref
+import sys
+import re
+
+
 
 def replace_prefix(s, old_prefix, new_prefix):
     return new_prefix + s[len(old_prefix):] if s.startswith(old_prefix) else s
@@ -25,6 +29,23 @@ def call_periodically(interval, func):
 
     threading.Thread(target = run, args = (), name="Retrace flush tracefile", daemon = True).start()
 
+def extract_frozen_name(filename):
+    # This pattern looks for exactly <frozen ...>
+    match = re.match(r"<frozen (.+)>", filename)
+    
+    # If a match is found, return group 1; otherwise return None
+    return match.group(1) if match else None
+
+cwd = os.getcwd()
+
+def normalize_path(path):
+    frozen_name = extract_frozen_name(path)
+
+    if frozen_name:
+        return sys.modules[frozen_name].__file__
+    else:
+        return replace_prefix(path, cwd + '/', '')
+
 class writer(_stream.ObjectWriter):
 
     def __init__(self, path, thread, 
@@ -33,11 +54,6 @@ class writer(_stream.ObjectWriter):
                  stacktraces = False, 
                  magic_markers = False):
         
-        cwd = os.getcwd()
-
-        def normalize_path(path):
-            return replace_prefix(path, cwd + '/', '')
-
         super().__init__(path, thread = thread, serializer = self.serialize, 
                         verbose = verbose,
                         stacktraces = stacktraces,
@@ -66,11 +82,6 @@ class reader(_stream.ObjectReader):
     def __init__(self, path, thread, timeout_seconds = 5, verbose = False, on_stack_difference = None, magic_markers = False):
 
         self.timeout_seconds = timeout_seconds
-
-        cwd = os.getcwd()
-
-        def normalize_path(path):
-            return replace_prefix(path, cwd + '/', '')
 
         super().__init__(path,
                          thread = thread, 
