@@ -10,7 +10,7 @@ jobs:
     with:
       package_name: "retracesoftware_stream"
       release_tag: ${{ github.ref_name }}
-      debug_build: false
+      build_debug: false
     secrets: inherit
 
   build-debug:
@@ -18,7 +18,7 @@ jobs:
     with:
       package_name: "retracesoftware_stream_debug"
       release_tag: ${{ github.ref_name }}
-      debug_build: true
+      build_debug: true
     secrets: inherit
   
   publish-pypi:

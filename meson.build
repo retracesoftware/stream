@@ -8,14 +8,15 @@ project(
 # Bind to the interpreter Meson/meson-python wants us to use.
 py = import('python').find_installation()
 
-# Debug build option - when true, builds retracesoftware_stream_debug
+# Debug build option - adds DEBUG_BUILD=1 define, but keeps same module name
 debug_build = get_option('debug_build')
 
+# Import name is always 'retracesoftware_stream' for both release and debug packages
+module_name = 'retracesoftware_stream'
+
 if debug_build
-  module_name = 'retracesoftware_stream_debug'
   extra_cpp_args = ['-DDEBUG_BUILD=1']
 else
-  module_name = 'retracesoftware_stream'
   extra_cpp_args = []
 endif
 
