@@ -8,6 +8,17 @@ project(
 # Bind to the interpreter Meson/meson-python wants us to use.
 py = import('python').find_installation()
 
+# Debug build option - when true, builds retracesoftware_stream_debug
+debug_build = get_option('debug_build')
+
+if debug_build
+  module_name = 'retracesoftware_stream_debug'
+  extra_cpp_args = ['-DDEBUG_BUILD=1']
+else
+  module_name = 'retracesoftware_stream'
+  extra_cpp_args = []
+endif
+
 install_subdir('proxy', install_dir: py.get_install_dir() / 'retracesoftware')
 
 #  'proxy/__init__.py',
@@ -22,7 +33,7 @@ py.install_sources(
   subdir: 'retracesoftware')
 
 py.extension_module(
-  'retracesoftware_stream',
+  module_name,
   sources: ['src/objectreader.cpp',
             'src/objectwriter.cpp',
             'src/objectstream.cpp',
@@ -33,7 +44,6 @@ py.extension_module(
   
   install: true,
 
-  # If you want extra flags:
-  # cpp_args: ['-O3', '-fvisibility=hidden'],
+  cpp_args: extra_cpp_args,
   include_directories: include_directories('common-headers/include'),
 )

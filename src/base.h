@@ -45,8 +45,8 @@ namespace retracesoftware_stream {
         // int stack_stop_at;
 
         static PyObject * py_exclude_from_stacktrace(ReaderWriterBase * self, PyObject* obj) {
-            if (!PyFunction_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "py_exclude_from_stacktrace takes a function, was passed: %S", obj);
+            if (obj == nullptr || !PyFunction_Check(obj)) {
+                PyErr_Format(PyExc_TypeError, "py_exclude_from_stacktrace takes a function, was passed: %.100s", obj ? Py_TYPE(obj)->tp_name : "NULL");
                 return nullptr;
             }
             
