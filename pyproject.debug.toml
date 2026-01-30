@@ -35,4 +35,4 @@ requires = [
 build-backend = "mesonpy"
 
 [tool.meson-python.args]
-setup = ['-Dbuildtype=debug', '-Ddebug_build=true']
+setup = ['-Ddebug_build=true']
