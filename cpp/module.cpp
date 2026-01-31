@@ -57,16 +57,26 @@ static PyMethodDef module_methods[] = {
     {NULL, NULL, 0, NULL}  // Sentinel
 };
 
+// Module name macros - allows building as _release or _debug
+#ifndef MODULE_NAME
+#define MODULE_NAME retracesoftware_stream
+#endif
+
+#define _STR(x) #x
+#define STR(x) _STR(x)
+#define _CONCAT(a, b) a##b
+#define CONCAT(a, b) _CONCAT(a, b)
+
 // Module definition
 static PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
-    "retracesoftware_stream",
+    STR(MODULE_NAME),
     "TODO",
     0,
     module_methods
 };
 
-PyMODINIT_FUNC PyInit_retracesoftware_stream(void) {
+PyMODINIT_FUNC CONCAT(PyInit_, MODULE_NAME)(void) {
     PyObject* module = PyModule_Create(&moduledef);
 
     if (!module) {

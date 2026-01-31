@@ -1,1 +1,0 @@
-option('debug_build', type: 'boolean', value: false, description: 'Build the debug variant (retracesoftware_stream_debug)')

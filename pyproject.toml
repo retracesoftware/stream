@@ -32,3 +32,6 @@ requires = [
 ]
 
 build-backend = "mesonpy"
+
+[tool.meson-python.args]
+setup = ['-Dstrip=false']

@@ -1,50 +1,20 @@
-# meson.build
+# meson.build - Project configuration + shared build logic
+
 project(
-  'retracesoftware_stream', 
+  '_retracesoftware_stream',
   'cpp',
   version: run_command('python', '-m', 'setuptools_scm', check: true, capture: true).stdout().strip(),
-  default_options: ['cpp_std=c++20'])
+  default_options: ['cpp_std=c++20', 'strip=false'])
 
-# Bind to the interpreter Meson/meson-python wants us to use.
-py = import('python').find_installation()
+# Project-specific configuration
+rs_extension_name = '_retracesoftware_stream'
+rs_cpp_source_dir = 'cpp'
+rs_ext_install_subdir = ''
 
-# Debug build option - adds DEBUG_BUILD=1 define, but keeps same module name
-debug_build = get_option('debug_build')
+# Custom Python installs (different destinations)
+py = import('python').find_installation(pure: false)
+py.install_sources('src/retracesoftware/stream.py', subdir: 'retracesoftware')
+py.install_sources('src/retracesoftware/stream/__init__.py', subdir: 'retracesoftware/stream')
 
-# Import name is always 'retracesoftware_stream' for both release and debug packages
-module_name = 'retracesoftware_stream'
-
-if debug_build
-  extra_cpp_args = ['-DDEBUG_BUILD=1']
-else
-  extra_cpp_args = []
-endif
-
-install_subdir('proxy', install_dir: py.get_install_dir() / 'retracesoftware')
-
-#  'proxy/__init__.py',
-#  'proxy/install.py',
-#  'proxy/proxyfactory.py',
-#  'proxy/record.py',
-#  'proxy/replay.py',
-#  subdir: 'retracesoftware'
-
-py.install_sources(
-  'src/stream.py',
-  subdir: 'retracesoftware')
-
-py.extension_module(
-  module_name,
-  sources: ['src/objectreader.cpp',
-            'src/objectwriter.cpp',
-            'src/objectstream.cpp',
-            'src/stack.cpp',
-            'src/search.cpp',
-            'src/module.cpp',
-            'src/demux.cpp'],
-  
-  install: true,
-
-  cpp_args: extra_cpp_args,
-  include_directories: include_directories('common-headers/include'),
-)
+# Include shared build logic (builds release/debug modules)
+subdir('common-headers/meson')
