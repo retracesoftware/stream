@@ -2,13 +2,13 @@ import pytest
 
 # 1. Check if the top-level package even exists
 try:
-    import retracesoftware_stream
-    print(f"DEBUG: Found top-level at {retracesoftware_stream.__file__}")
+    import retracesoftware.stream
+    print(f"DEBUG: Found top-level at {retracesoftware.stream.__file__}")
 except ImportError as e:
     print(f"DEBUG: Could not find retracesoftware_stream: {e}")
     
 # Skip if the compiled extension (or its deps) is not available.
-pytest.importorskip("retracesoftware_stream")
+pytest.importorskip("retracesoftware.stream")
 stream = pytest.importorskip("retracesoftware.stream")
 
 
