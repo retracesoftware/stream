@@ -10,11 +10,8 @@ project(
 rs_extension_name = '_retracesoftware_stream'
 rs_cpp_source_dir = 'cpp'
 rs_ext_install_subdir = ''
-
-# Custom Python installs (different destinations)
-py = import('python').find_installation(pure: false)
-py.install_sources('src/retracesoftware/stream.py', subdir: 'retracesoftware')
-py.install_sources('src/retracesoftware/stream/__init__.py', subdir: 'retracesoftware/stream')
+rs_py_sources = ['src/retracesoftware/stream/__init__.py']
+rs_py_install_subdir = 'retracesoftware/stream'
 
 # Include shared build logic (builds release/debug modules)
 subdir('common-headers/meson')
