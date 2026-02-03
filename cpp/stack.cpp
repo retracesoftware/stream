@@ -8,10 +8,11 @@
 #if PY_VERSION_HEX >= 0x030C0000  // Python 3.12 or higher
 static PyObject * get_func(_PyInterpreterFrame * frame) {
     // In Python 3.12+, f_funcobj can be non-function objects for internal frames
-    // (e.g., dicts for class definition frames). Return nullptr for non-callables
+    // (e.g., dicts for class definition frames). Return nullptr for unhashable types
     // to avoid "unhashable type: 'dict'" errors in PySet_Contains.
     PyObject * func = frame->f_funcobj;
-    if (func && PyCallable_Check(func)) {
+    // Skip dicts (class definition frames) and other unhashable types
+    if (func && !PyDict_Check(func)) {
         return func;
     }
     return nullptr;
