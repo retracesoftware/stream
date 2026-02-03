@@ -7,7 +7,14 @@
 
 #if PY_VERSION_HEX >= 0x030C0000  // Python 3.12 or higher
 static PyObject * get_func(_PyInterpreterFrame * frame) {
-    return frame->f_funcobj;
+    // In Python 3.12+, f_funcobj can be non-function objects for internal frames
+    // (e.g., dicts for class definition frames). Return nullptr for non-callables
+    // to avoid "unhashable type: 'dict'" errors in PySet_Contains.
+    PyObject * func = frame->f_funcobj;
+    if (func && PyCallable_Check(func)) {
+        return func;
+    }
+    return nullptr;
 }
 #else
 static PyObject * get_func(_PyInterpreterFrame * frame) {
@@ -75,7 +82,9 @@ namespace retracesoftware_stream {
         
         // First pass to count the number of non-excluded frames
         while (current != nullptr) {
-            if (!exclude.contains(get_func(current))) {
+            PyObject * func = get_func(current);
+            // Skip frames with invalid/non-callable f_funcobj (e.g., class definition frames)
+            if (func && !exclude.contains(func)) {
                 count++;
             }
             current = current->previous;
@@ -90,7 +99,9 @@ namespace retracesoftware_stream {
         // This populates the vector in reverse order (deepest frames first), 
         // matching the behavior of the original recursive solution's push_back.
         while (current != nullptr) {
-            if (!exclude.contains(get_func(current))) {
+            PyObject * func = get_func(current);
+            // Skip frames with invalid/non-callable f_funcobj (e.g., class definition frames)
+            if (func && !exclude.contains(func)) {
                 // Note: Since we are iterating backward (from current frame back to main),
                 // and push_back adds to the end, the resulting vector will be ordered
                 // from the deepest frame to the outermost frame (matching the original).
@@ -120,7 +131,10 @@ namespace retracesoftware_stream {
         
         // First pass to count the number of non-excluded frames
         while (current != nullptr) {
-            if (!PySet_Contains(exclude, get_func(current))) {
+            PyObject * func = get_func(current);
+            // Skip frames with invalid/non-callable f_funcobj, or check if excluded
+            // PySet_Contains returns -1 on error, 0 if not found, 1 if found
+            if (func && PySet_Contains(exclude, func) == 0) {
                 count++;
             }
             current = current->previous;
@@ -135,7 +149,9 @@ namespace retracesoftware_stream {
         // This populates the vector in reverse order (deepest frames first), 
         // matching the behavior of the original recursive solution's push_back.
         while (current != nullptr) {
-            if (!PySet_Contains(exclude, get_func(current))) {
+            PyObject * func = get_func(current);
+            // Skip frames with invalid/non-callable f_funcobj, or check if excluded
+            if (func && PySet_Contains(exclude, func) == 0) {
                 // Note: Since we are iterating backward (from current frame back to main),
                 // and push_back adds to the end, the resulting vector will be ordered
                 // from the deepest frame to the outermost frame (matching the original).
@@ -211,7 +227,10 @@ namespace retracesoftware_stream {
     PyObject * stack(PyObject *exclude) {
         try {
             return stack([exclude] (_PyInterpreterFrame * frame) {
-                switch (PySet_Contains(exclude, get_func(frame))) {
+                PyObject * func = get_func(frame);
+                // Skip frames with invalid/non-callable f_funcobj (e.g., class definition frames)
+                if (!func) return false;
+                switch (PySet_Contains(exclude, func)) {
                     case 0: return true;
                     case 1: return false;
                     default: throw nullptr;
@@ -227,11 +246,11 @@ namespace retracesoftware_stream {
         if (frame) {
             auto [common, index] = update_stack(exclude, stack, frame->previous);
 
-            if (exclude.contains(get_func(frame))) {
+            PyObject * func = get_func(frame);
+            // Skip frames with invalid/non-callable f_funcobj (e.g., class definition frames)
+            if (!func || exclude.contains(func)) {
                 return {common, index};
             }
-
-            assert(get_func(frame));
             
             // if (instr_size(frame->prev_instr) > 1) {
             //     raise(SIGTRAP);
