@@ -74,14 +74,27 @@ def extract_frozen_name(filename):
     match = re.match(r"<frozen (.+)>", filename)
     return match.group(1) if match else None
 
-_cwd = os.getcwd()
 
 def normalize_path(path):
+    """
+    Normalize a path to an absolute path for consistent record/replay.
+    
+    Uses os.path.realpath to resolve symlinks and get canonical absolute paths.
+    This ensures the same file always has the same path representation.
+    """
+    # Handle frozen modules - get their actual file path
     frozen_name = extract_frozen_name(path)
     if frozen_name:
-        return sys.modules[frozen_name].__file__
-    else:
-        return replace_prefix(path, _cwd + '/', '')
+        mod = sys.modules.get(frozen_name)
+        if mod and hasattr(mod, '__file__') and mod.__file__:
+            return os.path.realpath(mod.__file__)
+        return path  # fallback to original if module not found
+    
+    # Return canonical absolute path
+    try:
+        return os.path.realpath(path)
+    except (OSError, TypeError):
+        return path
 
 
 class writer(_backend_mod.ObjectWriter):
