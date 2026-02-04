@@ -212,17 +212,18 @@ namespace retracesoftware_stream {
     constexpr const char * FixedSizeTypes_Name(enum FixedSizeTypes root) {
         switch (root) {
             case FixedSizeTypes::NONE: return "NONE";
-            // case FixedSizeTypes::C_NULL: return "C_NULL";
             case FixedSizeTypes::TRUE: return "TRUE";
             case FixedSizeTypes::FALSE: return "FALSE";
-            // case FixedSizeTypes::REF: return "REF";
+            case FixedSizeTypes::FLOAT: return "FLOAT";
             case FixedSizeTypes::NEG1: return "NEG1";
             case FixedSizeTypes::INT64: return "INT64";
-            // case FixedSizeTypes::BIND: return "BIND";
             case FixedSizeTypes::EXT_BIND: return "EXT_BIND";
-            // case FixedSizeTypes::STACK: return "STACK";
-            // case FixedSizeTypes::ADD_FILENAME: return "ADD_FILENAME";
-
+            case FixedSizeTypes::THREAD_SWITCH: return "THREAD_SWITCH";
+            case FixedSizeTypes::NEW_HANDLE: return "NEW_HANDLE";
+            case FixedSizeTypes::BIND: return "BIND";
+            case FixedSizeTypes::STACK: return "STACK";
+            case FixedSizeTypes::ADD_FILENAME: return "ADD_FILENAME";
+            case FixedSizeTypes::CHECKSUM: return "CHECKSUM";
             default: return nullptr;
         }
     }
