@@ -632,13 +632,15 @@ namespace retracesoftware_stream {
                 return nullptr;
             }
 
+            size_t start_bytes = bytes_read;
+
             Control control = consume();
 
             if (control == Stack) {
                 int to_drop = read_expected_int();
 
                 if (verbose) {
-                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed STACK - drop: %i\n", messages_read, bytes_read, to_drop);
+                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed STACK - drop: %i\n", messages_read, start_bytes, to_drop);
                 }
 
                 PyObject * stack_delta = read_stack_delta();
@@ -657,7 +659,7 @@ namespace retracesoftware_stream {
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(thread);
-                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed THREAD_SWITCH(%s)\n", messages_read, bytes_read, PyUnicode_AsUTF8(s));
+                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed THREAD_SWITCH(%s)\n", messages_read, start_bytes, PyUnicode_AsUTF8(s));
                     Py_DECREF(s);
                 }
                 messages_read++;
@@ -666,7 +668,7 @@ namespace retracesoftware_stream {
                 return result;
             }
             if (control == Bind) {
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Read BIND\n", messages_read, bytes_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Read BIND\n", messages_read, start_bytes);
 
                 pending_bind = true;
                 messages_read++;
@@ -677,7 +679,7 @@ namespace retracesoftware_stream {
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(result);
-                    printf("Retrace - ObjectStream[%lu, %lu] - Read: %s\n", messages_read, bytes_read, PyUnicode_AsUTF8(s));
+                    printf("Retrace - ObjectStream[%lu, %lu] - Read: %s\n", messages_read, start_bytes, PyUnicode_AsUTF8(s));
                     Py_DECREF(s);
                 }
                 messages_read++;
