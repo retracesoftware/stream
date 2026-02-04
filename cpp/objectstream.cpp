@@ -556,6 +556,8 @@ namespace retracesoftware_stream {
         }
 
         Control consume() {
+            size_t bytes_read = this->bytes_read;
+
             Control control = read_control();
             
             if (control == NewHandle) {

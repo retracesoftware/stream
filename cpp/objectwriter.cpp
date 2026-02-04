@@ -183,7 +183,7 @@ namespace retracesoftware_stream {
             if (bytes_written == 0) {
                 bytes_written = stream.get_bytes_written();
             }
-            printf("Retrace(%i) - ObjectWriter[%lu, %lu] -- ", ::pid(), messages_written, stream.get_bytes_written());
+            printf("Retrace(%i) - ObjectWriter[%lu, %lu] -- ", ::pid(), messages_written, bytes_written);
         }
 
         static PyObject * StreamHandle_vectorcall(StreamHandle * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
@@ -233,7 +233,7 @@ namespace retracesoftware_stream {
 
                 if (verbose) {
                     debug_prefix();
-                    printf("STACKTRACE\n");
+                    printf("STACKTRACE(%lu, %lu)\n", old_size - skip, new_frame_elements.size());
                 }                
                 stream.write_stacktrace(old_size - skip, new_frame_elements);
                 messages_written++;
