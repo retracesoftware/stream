@@ -77,10 +77,10 @@ def extract_frozen_name(filename):
 
 def normalize_path(path):
     """
-    Normalize a path to an absolute path for consistent record/replay.
+    Normalize a path to an absolute path for recording.
     
-    Uses os.path.realpath to resolve symlinks and get canonical absolute paths.
-    This ensures the same file always has the same path representation.
+    Recording stores absolute paths. Replay uses path_info from settings.json
+    to map paths appropriately.
     """
     # Handle frozen modules - get their actual file path
     frozen_name = extract_frozen_name(path)
@@ -95,6 +95,79 @@ def normalize_path(path):
         return os.path.realpath(path)
     except (OSError, TypeError):
         return path
+
+
+def get_path_info():
+    """Get current path info for recording in settings.json."""
+    try:
+        cwd = os.path.realpath(os.getcwd())
+    except OSError:
+        cwd = None
+    
+    real_sys_path = []
+    for p in sys.path:
+        if p:
+            try:
+                real_p = os.path.realpath(p)
+                if real_p:
+                    real_sys_path.append(real_p)
+            except OSError:
+                pass
+    
+    return {
+        'cwd': cwd,
+        'sys_path': real_sys_path,
+    }
+
+
+def create_replay_normalizer(recorded_path_info, replay_cwd):
+    """
+    Create a path normalizer for replay that maps recorded absolute paths
+    to replay paths.
+    
+    Args:
+        recorded_path_info: dict with 'cwd' and 'sys_path' from recording
+        replay_cwd: the cwd during replay (typically recording/run/)
+    
+    Returns:
+        A function that normalizes paths for replay
+    """
+    recorded_cwd = recorded_path_info.get('cwd')
+    replay_cwd = os.path.realpath(replay_cwd)
+    
+    def replay_normalize(path):
+        # Handle frozen modules
+        frozen_name = extract_frozen_name(path)
+        if frozen_name:
+            mod = sys.modules.get(frozen_name)
+            if mod and hasattr(mod, '__file__') and mod.__file__:
+                path = os.path.realpath(mod.__file__)
+            else:
+                return path
+        else:
+            try:
+                path = os.path.realpath(path)
+            except (OSError, TypeError):
+                return path
+        
+        # If path was under recorded cwd, map to replay cwd
+        if recorded_cwd and path.startswith(recorded_cwd + os.sep):
+            relative = path[len(recorded_cwd) + 1:]
+            return os.path.join(replay_cwd, relative)
+        
+        # Otherwise return as-is (site-packages paths should match)
+        return path
+    
+    return replay_normalize
+
+
+# Global replay normalizer - set by proxy during replay setup
+_replay_normalizer = None
+
+def set_replay_normalizer(normalizer):
+    """Set the replay path normalizer. Call with None to clear."""
+    global _replay_normalizer
+    _replay_normalizer = normalizer
 
 
 class writer(_backend_mod.ObjectWriter):
@@ -257,7 +330,9 @@ class reader1(_backend_mod.ObjectStreamReader):
 
 
 def stack(exclude):
-    return [(normalize_path(filename), lineno) for filename, lineno in _backend_mod.stack(exclude)]
+    # Use replay normalizer if set, otherwise default normalize_path
+    normalizer = _replay_normalizer if _replay_normalizer else normalize_path
+    return [(normalizer(filename), lineno) for filename, lineno in _backend_mod.stack(exclude)]
 
 
 __all__ = sorted([k for k in globals().keys() if not k.startswith("_")])
