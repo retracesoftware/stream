@@ -34,8 +34,8 @@ try:
     else:
         import _retracesoftware_stream_release as _backend_mod  # type: ignore
         __backend__ = "native-release"
-except Exception:
-    raise ImportError("Failed to load retracesoftware_stream native extension")
+except Exception as e:
+    raise ImportError(f"Failed to load retracesoftware_stream native extension: {e}") from e
 
 # Expose debug mode flag
 DEBUG_MODE = _DEBUG_MODE and __backend__.startswith("native")
