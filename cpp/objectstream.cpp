@@ -275,7 +275,14 @@ namespace retracesoftware_stream {
             if (!list.get()) { throw nullptr; }
 
             for (size_t i = 0; i < size; i++) {
-                PyList_SetItem(list.get(), i, read());
+                PyObject * item = read();
+                if (!item) {
+                    if (!PyErr_Occurred()) {
+                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in read_list");
+                    }
+                    throw nullptr;
+                }
+                PyList_SetItem(list.get(), i, item);
             }
             return Py_NewRef(list.get());
         }
@@ -294,7 +301,12 @@ namespace retracesoftware_stream {
 
                 PyObject * item = read();
 
-                assert(item);
+                if (!item) {
+                    if (!PyErr_Occurred()) {
+                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in read_tuple");
+                    }
+                    throw nullptr;
+                }
 
                 if (PyTuple_SetItem(tuple.get(), i, item) == -1) {
                     throw std::exception();
@@ -522,8 +534,16 @@ namespace retracesoftware_stream {
 
             PyTypeObject * cls = (PyTypeObject *)read();
             
+            if (!cls) {
+                if (!PyErr_Occurred()) {
+                    PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in read_ext_bind");
+                }
+                throw nullptr;
+            }
+
             if (!PyType_Check((PyObject *)cls)) {
                 PyErr_Format(PyExc_TypeError, "Expected next item read to be a type but was: %S", cls);
+                Py_DECREF(cls);
                 throw nullptr;
             }
             PyObject * empty = PyTuple_New(0);
@@ -546,13 +566,27 @@ namespace retracesoftware_stream {
             if (control == NewHandle) {
                 if (verbose) printf("Retrace - ObjectStream[%lu] - Consumed NEW_HANDLE\n", messages_read);
 
-                handles.push_back(read());
+                PyObject * handle = read();
+                if (!handle) {
+                    if (!PyErr_Occurred()) {
+                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in NewHandle");
+                    }
+                    throw nullptr;
+                }
+                handles.push_back(handle);
                 messages_read++;
                 return consume();
             } else if (control == AddFilename) {
                 if (verbose) printf("Retrace - ObjectStream[%lu] - Consumed ADD_FILENAME\n", messages_read);
 
-                filenames.push_back(read());
+                PyObject * filename = read();
+                if (!filename) {
+                    if (!PyErr_Occurred()) {
+                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in AddFilename");
+                    }
+                    throw nullptr;
+                }
+                filenames.push_back(filename);
                 messages_read++;
                 return consume();
             } else if (control.Sized.type == SizedTypes::DELETE) {
@@ -637,6 +671,12 @@ namespace retracesoftware_stream {
             if (control == ThreadSwitch) {
 
                 PyObject * thread = read();
+                if (!thread) {
+                    if (!PyErr_Occurred()) {
+                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in ThreadSwitch");
+                    }
+                    return nullptr;
+                }
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(thread);
@@ -657,6 +697,13 @@ namespace retracesoftware_stream {
             }
             else {
                 PyObject * result = read(control);
+
+                if (!result) {
+                    if (!PyErr_Occurred()) {
+                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in next()");
+                    }
+                    return nullptr;
+                }
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(result);
