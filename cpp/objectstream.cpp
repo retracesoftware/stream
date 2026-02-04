@@ -272,44 +272,22 @@ namespace retracesoftware_stream {
         PyObject * read_list(size_t size) {
             auto list = PyObjectPtr(PyList_New(size));
 
-            if (!list.get()) { throw nullptr; }
+            if (!list.get()) throw nullptr;
 
             for (size_t i = 0; i < size; i++) {
-                PyObject * item = read();
-                if (!item) {
-                    if (!PyErr_Occurred()) {
-                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in read_list");
-                    }
-                    throw nullptr;
-                }
-                PyList_SetItem(list.get(), i, item);
+                PyList_SetItem(list.get(), i, read());
             }
             return Py_NewRef(list.get());
         }
 
         PyObject * read_tuple(size_t size) {
-            assert (!PyErr_Occurred());
-
             auto tuple = PyObjectPtr(PyTuple_New(size));
 
-            if (!tuple.get()) {
-                throw std::exception();
-            }
+            if (!tuple.get()) throw nullptr;
 
             for (size_t i = 0; i < size; i++) {
-                assert (!PyErr_Occurred());
-
-                PyObject * item = read();
-
-                if (!item) {
-                    if (!PyErr_Occurred()) {
-                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in read_tuple");
-                    }
+                if (PyTuple_SetItem(tuple.get(), i, read()) == -1) {
                     throw nullptr;
-                }
-
-                if (PyTuple_SetItem(tuple.get(), i, item) == -1) {
-                    throw std::exception();
                 }
             }
             return Py_NewRef(tuple.get());
@@ -354,8 +332,8 @@ namespace retracesoftware_stream {
                 int8_t * buffer = (int8_t *)malloc(size + 1);
 
                 if (!buffer) {
-                    PyErr_Format(PyExc_MemoryError, "Error allocating: %i bytes", size + 1);
-                    return nullptr;
+                    PyErr_Format(PyExc_MemoryError, "Error allocating: %zu bytes", size + 1);
+                    throw nullptr;
                 }
 
                 read((uint8_t *)buffer, size);
@@ -363,11 +341,9 @@ namespace retracesoftware_stream {
 
                 PyObject * str = PyUnicode_DecodeUTF8((char *)buffer, size, "strict");
 
-                // PyObject * str = PyUnicode_FromString((char *)buffer);
-
                 free(buffer);
-                assert(str);
 
+                if (!str) throw nullptr;
                 return str;
 
             } else {
@@ -377,11 +353,7 @@ namespace retracesoftware_stream {
 
                 PyObject * decoded = PyUnicode_DecodeUTF8((char *)scratch, size, "strict");
 
-                if (!decoded) {
-                    raise(SIGTRAP);
-                    assert (PyErr_Occurred());
-                    return nullptr;
-                }
+                if (!decoded) throw nullptr;
                 return decoded;
             }
         }
@@ -411,14 +383,16 @@ namespace retracesoftware_stream {
 
             Py_DECREF(bytes);
 
+            if (!res) throw nullptr;
             return res;
         }
 
         static PyObject * create_indexed(PyObject * factory, size_t index) {
             PyObject * i = PyLong_FromLong(index);
-            if (!i) return nullptr;
+            if (!i) throw nullptr;
             PyObject * res = PyObject_CallOneArg(factory, i);
             Py_DECREF(i);
+            if (!res) throw nullptr;
             return res;
         }
 
@@ -427,8 +401,11 @@ namespace retracesoftware_stream {
             size_t size = read_unsigned_number(control);
 
             switch (control.Sized.type) {
-                case SizedTypes::UINT: 
-                    return PyLong_FromLongLong(size);
+                case SizedTypes::UINT: {
+                    PyObject * result = PyLong_FromLongLong(size);
+                    if (!result) throw nullptr;
+                    return result;
+                }
                 case SizedTypes::HANDLE:
                     return Py_NewRef(handles[size]);
                 case SizedTypes::BINDING:
@@ -441,7 +418,7 @@ namespace retracesoftware_stream {
                 case SizedTypes::PICKLED: return read_pickled(size);
                 default:
                     PyErr_Format(PyExc_RuntimeError, "unknown sized type: %i", control.Sized.type);
-                    return nullptr;
+                    throw nullptr;
             }
         }
 
@@ -466,6 +443,7 @@ namespace retracesoftware_stream {
             int size = read_expected_int();
             
             PyObject * stack = PyList_New(size);
+            if (!stack) throw nullptr;
 
             for (size_t i = 0; i < size; i++) {
                 PyObject * filename = filenames[read<uint16_t>()];
@@ -477,9 +455,11 @@ namespace retracesoftware_stream {
                 }
 
                 PyObject * lineno = PyLong_FromLong(l);
+                if (!lineno) throw nullptr;
 
                 PyObject * frame = PyTuple_Pack(2, filename, lineno);
                 Py_DECREF(lineno);
+                if (!frame) throw nullptr;
 
                 PyList_SET_ITEM(stack, i, frame);
             }
@@ -566,27 +546,13 @@ namespace retracesoftware_stream {
             if (control == NewHandle) {
                 if (verbose) printf("Retrace - ObjectStream[%lu] - Consumed NEW_HANDLE\n", messages_read);
 
-                PyObject * handle = read();
-                if (!handle) {
-                    if (!PyErr_Occurred()) {
-                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in NewHandle");
-                    }
-                    throw nullptr;
-                }
-                handles.push_back(handle);
+                handles.push_back(read());
                 messages_read++;
                 return consume();
             } else if (control == AddFilename) {
                 if (verbose) printf("Retrace - ObjectStream[%lu] - Consumed ADD_FILENAME\n", messages_read);
 
-                PyObject * filename = read();
-                if (!filename) {
-                    if (!PyErr_Occurred()) {
-                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in AddFilename");
-                    }
-                    throw nullptr;
-                }
-                filenames.push_back(filename);
+                filenames.push_back(read());
                 messages_read++;
                 return consume();
             } else if (control.Sized.type == SizedTypes::DELETE) {
@@ -671,12 +637,6 @@ namespace retracesoftware_stream {
             if (control == ThreadSwitch) {
 
                 PyObject * thread = read();
-                if (!thread) {
-                    if (!PyErr_Occurred()) {
-                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in ThreadSwitch");
-                    }
-                    return nullptr;
-                }
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(thread);
@@ -697,13 +657,6 @@ namespace retracesoftware_stream {
             }
             else {
                 PyObject * result = read(control);
-
-                if (!result) {
-                    if (!PyErr_Occurred()) {
-                        PyErr_SetString(PyExc_RuntimeError, "read() returned NULL without setting exception in next()");
-                    }
-                    return nullptr;
-                }
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(result);
