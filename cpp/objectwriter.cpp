@@ -750,6 +750,8 @@ namespace retracesoftware_stream {
     }
 
 #ifndef _WIN32
+    #include <pthread.h>
+
     // Fork safety: prevent child processes from corrupting parent's trace file
     // 
     // On fork(), child inherits parent's FILE* buffer. If child flushes (explicitly
