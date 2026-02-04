@@ -40,6 +40,9 @@ namespace retracesoftware_stream {
 
     static std::vector<ObjectWriter *> writers;
 
+    // Forward declaration - defined after ObjectWriter struct
+    static void register_atfork_handlers();
+
     // static void patch_dealloc(PyTypeObject * cls) {
     //     assert(!is_patched(cls->tp_dealloc));
     //     if (cls->tp_free == PyObject_Free) {
@@ -568,6 +571,8 @@ namespace retracesoftware_stream {
                 new (&self->stream) MessageStream(PyUnicode_AsUTF8(s), 0, serializer);
                 Py_DECREF(s);
             }
+
+            register_atfork_handlers();  // Ensure fork safety is set up
             writers.push_back(self);
 
             // new (&self->cv) std::condition_variable();
@@ -713,6 +718,43 @@ namespace retracesoftware_stream {
             writer->stream.close();
         }
     }
+
+#ifndef _WIN32
+    // Fork safety: prevent child processes from corrupting parent's trace file
+    // 
+    // On fork(), child inherits parent's FILE* buffer. If child flushes (explicitly
+    // or on exit), it writes to parent's file, corrupting the trace.
+    //
+    // Solution:
+    // - prepare: flush all writers so parent's data is safely written
+    // - child: close fd without flush, abandon FILE* to prevent corruption
+
+    static void atfork_prepare() {
+        for (auto* w : writers) {
+            w->stream.flush();
+        }
+    }
+
+    static void atfork_child() {
+        for (auto* w : writers) {
+            w->stream.abandon_for_fork();
+        }
+        writers.clear();  // Child starts fresh - these writers are now invalid
+    }
+
+    static bool atfork_registered = false;
+
+    static void register_atfork_handlers() {
+        if (!atfork_registered) {
+            pthread_atfork(atfork_prepare, nullptr, atfork_child);
+            atfork_registered = true;
+        }
+    }
+#else
+    static void register_atfork_handlers() {
+        // Windows doesn't have fork() - CreateProcess doesn't inherit handles by default
+    }
+#endif
 
     static void on_free(void * obj) {
         for (ObjectWriter * writer : writers) {

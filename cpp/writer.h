@@ -356,6 +356,16 @@ namespace retracesoftware_stream {
                 fflush(file);
             }
         }
+
+        // For use in forked child: close fd without flushing buffer
+        // This prevents child from corrupting parent's trace file
+        void abandon_for_fork() {
+            if (file) {
+                int fd = fileno(file);
+                ::close(fd);  // Close fd first - prevents any writes
+                file = nullptr;  // Abandon FILE* without fclose (avoids flush)
+            }
+        }
     };
 
     static map<PyTypeObject *, freefunc> freefuncs;
@@ -641,5 +651,7 @@ namespace retracesoftware_stream {
         void close() { stream.close(); }
 
         void flush() { stream.flush(); }
+
+        void abandon_for_fork() { stream.abandon_for_fork(); }
     };
 }

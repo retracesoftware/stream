@@ -490,14 +490,9 @@ namespace retracesoftware_stream {
                     const char * name = FixedSizeTypes_Name(static_cast<FixedSizeTypes>(type));
 
                     if (name) {
-                        PyErr_Format(PyExc_RuntimeError, 
-                            "Unexpected control byte '%s' where object was expected. "
-                            "This usually indicates a version mismatch between recording and replay. "
-                            "Please re-record with the current version of retracesoftware.stream.", name);
+                        PyErr_Format(PyExc_RuntimeError, "unhandled subtype: %s for FixedSized", name);
                     } else {
-                        PyErr_Format(PyExc_RuntimeError, 
-                            "Unknown FixedSizeType: %i. "
-                            "This usually indicates a version mismatch between recording and replay.", type);
+                        PyErr_Format(PyExc_RuntimeError, "Unknown subtype: %i for FixedSized", type);
                     }
                     throw nullptr;
             };
