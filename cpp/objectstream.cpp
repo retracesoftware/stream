@@ -555,48 +555,39 @@ namespace retracesoftware_stream {
             return instance;
         }
 
-        std::pair<Control, size_t> consume() {
-            size_t start = this->bytes_read;
-
-            Control control = read_control();
-            
-            if (control == NewHandle) {
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed NEW_HANDLE\n", messages_read, start);
-
-                handles.push_back(read());
-                messages_read++;
-                return consume();
-            } else if (control == AddFilename) {
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed ADD_FILENAME\n", messages_read, start);
-
-                filenames.push_back(read());
-                messages_read++;
-                return consume();
-            } else if (control.Sized.type == SizedTypes::DELETE) {
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed DELETE\n", messages_read, start);
-
-                size_t size = read_unsigned_number(control);
-                int index = handles.size() - 1 - size;
-                Py_DECREF(handles[index]);
-                handles[index] = nullptr;
-                messages_read++;
-                return consume();
-            } else if (control.Sized.type == SizedTypes::BINDING_DELETE) {
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed BINDING_DELETE\n", messages_read, start);
-
-                size_t size = read_unsigned_number(control);
-                Py_DECREF(bindings[size]);
-                bindings.erase(size);
-                messages_read++;
-                return consume();
-            } else if (control == ExtBind) {                
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed EXT_BIND\n", messages_read, start);
-
-                bindings[binding_counter++] = read_ext_bind();
-                messages_read++;
-                return consume();
-            } else {
-                return {control, start};
+        Control consume(size_t & start) {
+            while (true) {
+                start = bytes_read;
+                Control control = read_control();
+                
+                if (control == NewHandle) {
+                    if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed NEW_HANDLE\n", messages_read, start);
+                    handles.push_back(read());
+                    messages_read++;
+                } else if (control == AddFilename) {
+                    if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed ADD_FILENAME\n", messages_read, start);
+                    filenames.push_back(read());
+                    messages_read++;
+                } else if (control.Sized.type == SizedTypes::DELETE) {
+                    if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed DELETE\n", messages_read, start);
+                    size_t size = read_unsigned_number(control);
+                    int index = handles.size() - 1 - size;
+                    Py_DECREF(handles[index]);
+                    handles[index] = nullptr;
+                    messages_read++;
+                } else if (control.Sized.type == SizedTypes::BINDING_DELETE) {
+                    if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed BINDING_DELETE\n", messages_read, start);
+                    size_t size = read_unsigned_number(control);
+                    Py_DECREF(bindings[size]);
+                    bindings.erase(size);
+                    messages_read++;
+                } else if (control == ExtBind) {                
+                    if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed EXT_BIND\n", messages_read, start);
+                    bindings[binding_counter++] = read_ext_bind();
+                    messages_read++;
+                } else {
+                    return control;
+                }
             }
         }
 
@@ -632,7 +623,8 @@ namespace retracesoftware_stream {
                 return nullptr;
             }
 
-            auto [control, start] = consume();
+            size_t start;
+            Control control = consume(start);
 
             if (control == Stack) {
                 int to_drop = read_expected_int();
