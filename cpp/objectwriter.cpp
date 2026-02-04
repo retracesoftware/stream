@@ -179,7 +179,10 @@ namespace retracesoftware_stream {
             }
         }
 
-        void debug_prefix() {
+        void debug_prefix(size_t bytes_written = 0) {
+            if (bytes_written == 0) {
+                bytes_written = stream.get_bytes_written();
+            }
             printf("Retrace(%i) - ObjectWriter[%lu, %lu] -- ", ::pid(), messages_written, stream.get_bytes_written());
         }
 
@@ -198,13 +201,41 @@ namespace retracesoftware_stream {
             }
         }
         
+        void write_filename(PyObject * filename) {
+            size_t bytes_written = stream.get_bytes_written();
+
+            if (stream.write_filename(filename, normalize_path)) {
+                if (verbose) {
+                    debug_prefix(bytes_written);
+                    printf("ADD_FILENAME(%s)\n", PyUnicode_AsUTF8(filename));
+                }
+                messages_written++;
+            }
+        }
+
         void write_stacktrace() {
             if (!writing && stacktraces) {
+
+                static thread_local std::vector<Frame> stack;
+        
+                size_t old_size = stack.size();
+                size_t skip = update_stack(exclude_stacktrace, stack);
+                
+                assert(skip <= old_size);
+    
+                auto new_frame_elements = std::span(stack).subspan(skip);
+    
+                for (auto frame : new_frame_elements) {
+                    PyObject * filename = frame.code_object->co_filename;
+                    assert(PyUnicode_Check(filename));    
+                    write_filename(filename);
+                }
+
                 if (verbose) {
                     debug_prefix();
                     printf("STACKTRACE\n");
-                }
-                stream.write_stacktrace(exclude_stacktrace, normalize_path);
+                }                
+                stream.write_stacktrace(old_size - skip, new_frame_elements);
                 messages_written++;
             }
         }
@@ -277,14 +308,13 @@ namespace retracesoftware_stream {
                 return stream_handle(next_handle++, nullptr);
             }
 
-            stream.write_new_handle(obj);
-
             if (verbose) {
                 debug_prefix();
                 PyObject * str = PyObject_Str(obj);
                 printf("NEW_HANDLE(%s)\n", PyUnicode_AsUTF8(str));
                 Py_DECREF(str);
             }
+            stream.write_new_handle(obj);
             messages_written++;
             return stream_handle(next_handle++, verbose ? obj : nullptr);
         }

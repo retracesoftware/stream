@@ -415,6 +415,7 @@ namespace retracesoftware_stream {
         PyObject * serializer;
         map<PyObject *, int> bindings;
         int binding_counter = 0;
+
         map<PyObject *, uint16_t> filename_index;
         int filename_index_counter = 0;
 
@@ -488,7 +489,6 @@ namespace retracesoftware_stream {
             stream(path, write_timeout), 
             serializer(Py_XNewRef(serializer)) {
 
-
             // thread(retracesoftware::FastCall(thread)) {
             // Py_XINCREF(thread);
             // last_thread_state = PyThreadState_Get();
@@ -502,55 +502,95 @@ namespace retracesoftware_stream {
             if (serializer) visit(serializer, arg);
         }
 
-
-        void write_stacktrace(const set<PyObject *>& exclude_stacktrace, PyObject * normalize_path) {
-
-            static thread_local std::vector<Frame> stack;
-
-            size_t old_size = stack.size();
-            size_t skip = update_stack(exclude_stacktrace, stack);
-            
-            assert(skip <= old_size);
-
-            auto new_frame_elements = std::span(stack).subspan(skip);
-
-            for (auto frame : new_frame_elements) {
-                PyObject * filename = frame.code_object->co_filename;
-                assert(PyUnicode_Check(filename));
-
-                if (!filename_index.contains(filename)) {
-                    stream.write_control(AddFilename);
-
-                    if (normalize_path) {
-                        PyObject * normalized = PyObject_CallOneArg(normalize_path, filename);
-                        if (!normalized) {  
-                            raise(SIGTRAP);
-                            throw nullptr;
-                        }
-                        write(normalized);
-                        Py_DECREF(normalized);
-                    } else {
-                        write(filename);
+        bool write_filename(PyObject * filename, PyObject * normalize_path) {
+            if (!filename_index.contains(filename)) {
+                stream.write_control(AddFilename);
+                if (normalize_path) {
+                    PyObject * normalized = PyObject_CallOneArg(normalize_path, filename);
+                    if (!normalized) {  
+                        raise(SIGTRAP);
+                        throw nullptr;
                     }
-                    filename_index[Py_NewRef(filename)] = filename_index_counter++;
+                    write(normalized);
+                    Py_DECREF(normalized);
+                } else {
+                    write(filename);
                 }
+                filename_index[Py_NewRef(filename)] = filename_index_counter++;
+                return true;
             }
+            return false;
+        }
 
-            // one byte
+        void write_stacktrace(size_t to_discard, std::span<Frame> new_elements) {
             stream.write_control(Stack);
 
             // how many to discard
-            stream.write_expected(old_size - skip);
+            stream.write_expected(to_discard);
 
-            stream.write_expected(new_frame_elements.size());
+            stream.write_expected(new_elements.size());
 
-            for (auto frame : new_frame_elements) {
+            for (auto frame : new_elements) {
                 PyObject * filename = frame.code_object->co_filename;
                 
                 stream.write(filename_index[filename]);
                 stream.write(frame.lineno());
             }
         }
+
+        //     const set<PyObject *>& exclude_stacktrace, PyObject * normalize_path) {
+
+        //     static thread_local std::vector<Frame> stack;
+
+        //     size_t old_size = stack.size();
+        //     size_t skip = update_stack(exclude_stacktrace, stack);
+            
+        //     assert(skip <= old_size);
+
+        //     auto new_frame_elements = std::span(stack).subspan(skip);
+
+        //     for (auto frame : new_frame_elements) {
+        //         PyObject * filename = frame.code_object->co_filename;
+        //         assert(PyUnicode_Check(filename));
+
+        //         if (!filename_index.contains(filename)) {
+
+        //             stream.write_control(AddFilename);
+
+        //             if (normalize_path) {
+        //                 PyObject * normalized = PyObject_CallOneArg(normalize_path, filename);
+        //                 if (!normalized) {  
+        //                     raise(SIGTRAP);
+        //                     throw nullptr;
+        //                 }
+        //                 write(normalized);
+        //                 Py_DECREF(normalized);
+        //             } else {
+        //                 write(filename);
+        //             }
+        //             filename_index[Py_NewRef(filename)] = filename_index_counter++;
+
+        //             if (verbose) {
+        //                 printf("Retrace - ObjectWriter[%lu] -- ADD_FILENAME(%s)\n", messages_written, PyUnicode_AsUTF8(filename));
+        //             }
+        //         }
+        //     }
+
+        //     // one byte
+        //     stream.write_control(Stack);
+
+        //     // how many to discard
+        //     stream.write_expected(old_size - skip);
+
+        //     stream.write_expected(new_frame_elements.size());
+
+        //     for (auto frame : new_frame_elements) {
+        //         PyObject * filename = frame.code_object->co_filename;
+                
+        //         stream.write(filename_index[filename]);
+        //         stream.write(frame.lineno());
+        //     }
+        // }
 
         void write_handle_delete(int delta) {
             stream.write_unsigned_number(SizedTypes::DELETE, delta);
