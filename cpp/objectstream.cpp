@@ -396,6 +396,22 @@ namespace retracesoftware_stream {
             return res;
         }
 
+        PyObject * read_bigint(size_t size) {
+            // Read big-endian signed bytes and convert to PyLong
+            uint8_t * buf = (uint8_t *)malloc(size);
+            if (!buf) {
+                PyErr_NoMemory();
+                throw nullptr;
+            }
+            read(buf, size);
+            int little_endian = 0;
+            int is_signed = 1;
+            PyObject * result = _PyLong_FromByteArray(buf, size, little_endian, is_signed);
+            free(buf);
+            if (!result) throw nullptr;
+            return result;
+        }
+
         PyObject * read_sized(Control control) {
 
             size_t size = read_unsigned_number(control);
@@ -416,6 +432,7 @@ namespace retracesoftware_stream {
                 case SizedTypes::TUPLE: return read_tuple(size);
                 case SizedTypes::STR: return read_str(size);
                 case SizedTypes::PICKLED: return read_pickled(size);
+                case SizedTypes::BIGINT: return read_bigint(size);
                 default:
                     PyErr_Format(PyExc_RuntimeError, "unknown sized type: %i", control.Sized.type);
                     throw nullptr;
