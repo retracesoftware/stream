@@ -120,56 +120,6 @@ def get_path_info():
     }
 
 
-def create_replay_normalizer(recorded_path_info, replay_cwd):
-    """
-    Create a path normalizer for replay that maps recorded absolute paths
-    to replay paths.
-    
-    Args:
-        recorded_path_info: dict with 'cwd' and 'sys_path' from recording
-        replay_cwd: the cwd during replay (typically recording/run/)
-    
-    Returns:
-        A function that normalizes paths for replay
-    """
-    recorded_cwd = recorded_path_info.get('cwd')
-    replay_cwd = os.path.realpath(replay_cwd)
-    
-    def replay_normalize(path):
-        # Handle frozen modules
-        frozen_name = extract_frozen_name(path)
-        if frozen_name:
-            mod = sys.modules.get(frozen_name)
-            if mod and hasattr(mod, '__file__') and mod.__file__:
-                path = os.path.realpath(mod.__file__)
-            else:
-                return path
-        else:
-            try:
-                path = os.path.realpath(path)
-            except (OSError, TypeError):
-                return path
-        
-        # If path was under recorded cwd, map to replay cwd
-        if recorded_cwd and path.startswith(recorded_cwd + os.sep):
-            relative = path[len(recorded_cwd) + 1:]
-            return os.path.join(replay_cwd, relative)
-        
-        # Otherwise return as-is (site-packages paths should match)
-        return path
-    
-    return replay_normalize
-
-
-# Global replay normalizer - set by proxy during replay setup
-_replay_normalizer = None
-
-def set_replay_normalizer(normalizer):
-    """Set the replay path normalizer. Call with None to clear."""
-    global _replay_normalizer
-    _replay_normalizer = normalizer
-
-
 class writer(_backend_mod.ObjectWriter):
 
     def __init__(self, path, thread, 
@@ -196,42 +146,6 @@ class writer(_backend_mod.ObjectWriter):
 
     def serialize(self, obj):
         return self.type_serializer.get(type(obj), pickle.dumps)(obj)
-
-
-class reader(_backend_mod.ObjectReader):
-
-    def __init__(self, path, thread, timeout_seconds=5, verbose=False, on_stack_difference=None, magic_markers=False):
-        self.timeout_seconds = timeout_seconds
-
-        super().__init__(path,
-                         thread=thread, 
-                         on_stack_difference=on_stack_difference,
-                         deserializer=self.deserialize,
-                         verbose=verbose,
-                         normalize_path=normalize_path,
-                         magic_markers=magic_markers)
-        
-        self.exclude_from_stacktrace(reader.__call__)
-        self.type_deserializer = {}
-    
-    def __enter__(self): return self
-
-    def __exit__(self, *args):
-        self.close()
-
-    def __call__(self):
-        return super().__call__(timeout_seconds=self.timeout_seconds,
-                       stacktrace=inspect.stack)
-    
-    def deserialize(self, bytes):
-        obj = pickle.loads(bytes)
-        if type(obj) in self.type_deserializer:
-            return self.type_deserializer[type(obj)](obj)
-        else:
-            return obj
-
-
-bind = object()
 
 
 class StickyPred:
@@ -330,9 +244,7 @@ class reader1(_backend_mod.ObjectStreamReader):
 
 
 def stack(exclude):
-    # Use replay normalizer if set, otherwise default normalize_path
-    normalizer = _replay_normalizer if _replay_normalizer else normalize_path
-    return [(normalizer(filename), lineno) for filename, lineno in _backend_mod.stack(exclude)]
+    return [(normalize_path(filename), lineno) for filename, lineno in _backend_mod.stack(exclude)]
 
 
 __all__ = sorted([k for k in globals().keys() if not k.startswith("_")])

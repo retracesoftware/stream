@@ -11,7 +11,6 @@ static PyTypeObject * hidden_types[] = {
 
 static PyTypeObject * exposed_types[] = {
     &retracesoftware_stream::ObjectWriter_Type,
-    &retracesoftware_stream::ObjectReader_Type,
     &retracesoftware_stream::ObjectStream_Type,
     &retracesoftware_stream::Demux_Type,
     nullptr

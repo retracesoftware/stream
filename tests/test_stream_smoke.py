@@ -16,8 +16,12 @@ def _thread_id() -> str:
     return "main-thread"
 
 
-def _noop_stack_diff(previous, recorded, replayed):
-    return None
+def _read_value(reader):
+    """Read the next non-control value from reader1."""
+    while True:
+        val = reader()
+        if not isinstance(val, (stream.Bind, stream.StackDelta, stream.ThreadSwitch)):
+            return val
 
 
 def test_replace_prefix():
@@ -33,15 +37,9 @@ def test_writer_reader_roundtrip(tmp_path):
         writer("hello", 123)
         writer.flush()
 
-    with stream.reader(
-        path,
-        thread=_thread_id,
-        timeout_seconds=1,
-        verbose=False,
-        on_stack_difference=_noop_stack_diff,
-    ) as reader:
-        assert reader() == "hello"
-        assert reader() == 123
+    with stream.reader1(path, read_timeout=1, verbose=False) as reader:
+        assert _read_value(reader) == "hello"
+        assert _read_value(reader) == 123
 
 
 def test_primitive_types(tmp_path):
@@ -71,15 +69,9 @@ def test_primitive_types(tmp_path):
             writer(val)
         writer.flush()
     
-    with stream.reader(
-        path,
-        thread=_thread_id,
-        timeout_seconds=1,
-        verbose=False,
-        on_stack_difference=_noop_stack_diff,
-    ) as reader:
+    with stream.reader1(path, read_timeout=1, verbose=False) as reader:
         for expected in test_values:
-            actual = reader()
+            actual = _read_value(reader)
             if expected != expected:  # NaN check
                 assert actual != actual
             else:
@@ -112,15 +104,9 @@ def test_collections(tmp_path):
             writer(val)
         writer.flush()
     
-    with stream.reader(
-        path,
-        thread=_thread_id,
-        timeout_seconds=1,
-        verbose=False,
-        on_stack_difference=_noop_stack_diff,
-    ) as reader:
+    with stream.reader1(path, read_timeout=1, verbose=False) as reader:
         for expected in test_values:
-            actual = reader()
+            actual = _read_value(reader)
             assert actual == expected, f"Expected {expected!r}, got {actual!r}"
 
 
@@ -141,15 +127,9 @@ def test_bytes(tmp_path):
             writer(val)
         writer.flush()
     
-    with stream.reader(
-        path,
-        thread=_thread_id,
-        timeout_seconds=1,
-        verbose=False,
-        on_stack_difference=_noop_stack_diff,
-    ) as reader:
+    with stream.reader1(path, read_timeout=1, verbose=False) as reader:
         for expected in test_values:
-            actual = reader()
+            actual = _read_value(reader)
             assert actual == expected, f"Expected {expected!r}, got {actual!r}"
 
 
@@ -161,41 +141,13 @@ def test_multiple_writes_single_call(tmp_path):
         writer("a", "b", "c", 1, 2, 3)
         writer.flush()
     
-    with stream.reader(
-        path,
-        thread=_thread_id,
-        timeout_seconds=1,
-        verbose=False,
-        on_stack_difference=_noop_stack_diff,
-    ) as reader:
-        assert reader() == "a"
-        assert reader() == "b"
-        assert reader() == "c"
-        assert reader() == 1
-        assert reader() == 2
-        assert reader() == 3
-
-
-def test_reader1_roundtrip(tmp_path):
-    """Test the reader1 (ObjectStreamReader) API."""
-    path = tmp_path / "trace.bin"
-    
-    test_values = [
-        "hello", 123, [1, 2, 3], {"key": "value"}, None, True
-    ]
-    
-    with stream.writer(path, thread=_thread_id, flush_interval=0.01) as writer:
-        for val in test_values:
-            writer(val)
-        writer.flush()
-    
     with stream.reader1(path, read_timeout=1, verbose=False) as reader:
-        for expected in test_values:
-            actual = reader()
-            # reader1 may return control objects, skip those
-            while isinstance(actual, (stream.Bind, stream.StackDelta, stream.ThreadSwitch)):
-                actual = reader()
-            assert actual == expected, f"Expected {expected!r}, got {actual!r}"
+        assert _read_value(reader) == "a"
+        assert _read_value(reader) == "b"
+        assert _read_value(reader) == "c"
+        assert _read_value(reader) == 1
+        assert _read_value(reader) == 2
+        assert _read_value(reader) == 3
 
 
 def test_large_data(tmp_path):
@@ -209,15 +161,8 @@ def test_large_data(tmp_path):
             writer(i, f"string_{i}", [i, i+1, i+2])
         writer.flush()
     
-    with stream.reader(
-        path,
-        thread=_thread_id,
-        timeout_seconds=5,
-        verbose=False,
-        on_stack_difference=_noop_stack_diff,
-    ) as reader:
+    with stream.reader1(path, read_timeout=5, verbose=False) as reader:
         for i in range(num_values):
-            assert reader() == i
-            assert reader() == f"string_{i}"
-            assert reader() == [i, i+1, i+2]
-
+            assert _read_value(reader) == i
+            assert _read_value(reader) == f"string_{i}"
+            assert _read_value(reader) == [i, i+1, i+2]
