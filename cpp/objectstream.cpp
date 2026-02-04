@@ -40,7 +40,6 @@ namespace retracesoftware_stream {
         FILE * file = nullptr;
         size_t bytes_read = 0;
         size_t messages_read = 0;
-        size_t last_control_start = 0;
         int read_timeout = 0;
         bool magic_markers = false;
         vectorcallfunc vectorcall;
@@ -556,25 +555,25 @@ namespace retracesoftware_stream {
             return instance;
         }
 
-        Control consume() {
-            size_t bytes_read = this->bytes_read;
+        std::pair<Control, size_t> consume() {
+            size_t start = this->bytes_read;
 
             Control control = read_control();
             
             if (control == NewHandle) {
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed NEW_HANDLE\n", messages_read, bytes_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed NEW_HANDLE\n", messages_read, start);
 
                 handles.push_back(read());
                 messages_read++;
                 return consume();
             } else if (control == AddFilename) {
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed ADD_FILENAME\n", messages_read, bytes_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed ADD_FILENAME\n", messages_read, start);
 
                 filenames.push_back(read());
                 messages_read++;
                 return consume();
             } else if (control.Sized.type == SizedTypes::DELETE) {
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed DELETE\n", messages_read, bytes_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed DELETE\n", messages_read, start);
 
                 size_t size = read_unsigned_number(control);
                 int index = handles.size() - 1 - size;
@@ -583,22 +582,21 @@ namespace retracesoftware_stream {
                 messages_read++;
                 return consume();
             } else if (control.Sized.type == SizedTypes::BINDING_DELETE) {
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed BINDING_DELETE\n", messages_read, bytes_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed BINDING_DELETE\n", messages_read, start);
 
-                size_t index = read_unsigned_number(control);
-                Py_DECREF(bindings[index]);
-                bindings.erase(index);
+                size_t size = read_unsigned_number(control);
+                Py_DECREF(bindings[size]);
+                bindings.erase(size);
                 messages_read++;
                 return consume();
             } else if (control == ExtBind) {                
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed EXT_BIND\n", messages_read, bytes_read);
+                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed EXT_BIND\n", messages_read, start);
 
                 bindings[binding_counter++] = read_ext_bind();
                 messages_read++;
                 return consume();
             } else {
-                last_control_start = bytes_read;
-                return control;
+                return {control, start};
             }
         }
 
@@ -634,13 +632,13 @@ namespace retracesoftware_stream {
                 return nullptr;
             }
 
-            Control control = consume();
+            auto [control, start] = consume();
 
             if (control == Stack) {
                 int to_drop = read_expected_int();
 
                 if (verbose) {
-                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed STACK - drop: %i\n", messages_read, last_control_start, to_drop);
+                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed STACK - drop: %i\n", messages_read, start, to_drop);
                 }
 
                 PyObject * stack_delta = read_stack_delta();
@@ -659,7 +657,7 @@ namespace retracesoftware_stream {
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(thread);
-                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed THREAD_SWITCH(%s)\n", messages_read, last_control_start, PyUnicode_AsUTF8(s));
+                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed THREAD_SWITCH(%s)\n", messages_read, start, PyUnicode_AsUTF8(s));
                     Py_DECREF(s);
                 }
                 messages_read++;
@@ -668,7 +666,7 @@ namespace retracesoftware_stream {
                 return result;
             }
             if (control == Bind) {
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Read BIND\n", messages_read, last_control_start);
+                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Read BIND\n", messages_read, start);
 
                 pending_bind = true;
                 messages_read++;
@@ -679,7 +677,7 @@ namespace retracesoftware_stream {
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(result);
-                    printf("Retrace - ObjectStream[%lu, %lu] - Read: %s\n", messages_read, last_control_start, PyUnicode_AsUTF8(s));
+                    printf("Retrace - ObjectStream[%lu, %lu] - Read: %s\n", messages_read, start, PyUnicode_AsUTF8(s));
                     Py_DECREF(s);
                 }
                 messages_read++;
