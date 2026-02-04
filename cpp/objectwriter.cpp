@@ -168,6 +168,8 @@ namespace retracesoftware_stream {
 
         // std::thread t1(thread_function, 1);
 
+        inline bool is_disabled() const { return path == Py_None; }
+
         void write_magic() { 
             if (magic_markers) {
                 stream.write_magic();
@@ -181,6 +183,9 @@ namespace retracesoftware_stream {
         static PyObject * StreamHandle_vectorcall(StreamHandle * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
             
             ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
+
+            // No-op when disabled (path=None, performance testing mode)
+            if (writer->is_disabled()) Py_RETURN_NONE;
 
             try {
                 writer->write_all(self, args, PyVectorcall_NARGS(nargsf));
@@ -202,6 +207,8 @@ namespace retracesoftware_stream {
         }
 
         void bind(PyObject * obj, bool ext) {
+            if (is_disabled()) return;
+
             EnsureOutput output(this);
 
             check_thread();
@@ -221,6 +228,8 @@ namespace retracesoftware_stream {
         }
 
         void write_delete(int id) {
+            if (is_disabled()) return;
+
             EnsureOutput output(this);
 
             if (verbose) {
@@ -259,6 +268,12 @@ namespace retracesoftware_stream {
         }
 
         PyObject * handle(PyObject * obj) {
+            // Return a handle even when disabled (for API compatibility)
+            // The handle's vectorcall will no-op
+            if (is_disabled()) {
+                return stream_handle(next_handle++, nullptr);
+            }
+
             stream.write_new_handle(obj);
 
             if (verbose) {
@@ -298,6 +313,8 @@ namespace retracesoftware_stream {
         }
 
         void object_freed(PyObject * obj) {
+            if (is_disabled()) return;
+
             EnsureOutput output(this);
             if (stream.object_freed(obj)) {
                 messages_written++;
@@ -546,7 +563,7 @@ namespace retracesoftware_stream {
             self->enable_when = nullptr;
             // self->stack_stop_at = 0;
 
-            {
+            if (path != Py_None) {
                 PyObject * s = PyObject_Str(path);
                 new (&self->stream) MessageStream(PyUnicode_AsUTF8(s), 0, serializer);
                 Py_DECREF(s);
@@ -560,6 +577,8 @@ namespace retracesoftware_stream {
         }
 
         void check_thread() {
+            if (is_disabled()) return;
+
             PyThreadState * tstate = PyThreadState_Get();
 
             if (thread.callable && last_thread_state != tstate) {
