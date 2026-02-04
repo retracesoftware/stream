@@ -40,6 +40,7 @@ namespace retracesoftware_stream {
         FILE * file = nullptr;
         size_t bytes_read = 0;
         size_t messages_read = 0;
+        size_t last_control_start = 0;
         int read_timeout = 0;
         bool magic_markers = false;
         vectorcallfunc vectorcall;
@@ -596,6 +597,7 @@ namespace retracesoftware_stream {
                 messages_read++;
                 return consume();
             } else {
+                last_control_start = bytes_read;
                 return control;
             }
         }
@@ -632,15 +634,13 @@ namespace retracesoftware_stream {
                 return nullptr;
             }
 
-            size_t start_bytes = bytes_read;
-
             Control control = consume();
 
             if (control == Stack) {
                 int to_drop = read_expected_int();
 
                 if (verbose) {
-                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed STACK - drop: %i\n", messages_read, start_bytes, to_drop);
+                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed STACK - drop: %i\n", messages_read, last_control_start, to_drop);
                 }
 
                 PyObject * stack_delta = read_stack_delta();
@@ -659,7 +659,7 @@ namespace retracesoftware_stream {
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(thread);
-                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed THREAD_SWITCH(%s)\n", messages_read, start_bytes, PyUnicode_AsUTF8(s));
+                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed THREAD_SWITCH(%s)\n", messages_read, last_control_start, PyUnicode_AsUTF8(s));
                     Py_DECREF(s);
                 }
                 messages_read++;
@@ -668,7 +668,7 @@ namespace retracesoftware_stream {
                 return result;
             }
             if (control == Bind) {
-                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Read BIND\n", messages_read, start_bytes);
+                if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Read BIND\n", messages_read, last_control_start);
 
                 pending_bind = true;
                 messages_read++;
@@ -679,7 +679,7 @@ namespace retracesoftware_stream {
 
                 if (verbose) {
                     PyObject * s = PyObject_Str(result);
-                    printf("Retrace - ObjectStream[%lu, %lu] - Read: %s\n", messages_read, start_bytes, PyUnicode_AsUTF8(s));
+                    printf("Retrace - ObjectStream[%lu, %lu] - Read: %s\n", messages_read, last_control_start, PyUnicode_AsUTF8(s));
                     Py_DECREF(s);
                 }
                 messages_read++;
