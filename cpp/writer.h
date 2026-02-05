@@ -504,17 +504,35 @@ namespace retracesoftware_stream {
 
         bool write_filename(PyObject * filename, PyObject * normalize_path) {
             if (!filename_index.contains(filename)) {
+                size_t pos_before = stream.get_bytes_written();
+                printf("  [DEBUG] write_filename START for '%s' at byte %zu\n", 
+                       PyUnicode_AsUTF8(filename), pos_before);
+                fflush(stdout);
                 stream.write_control(AddFilename);
+                printf("  [DEBUG] write_control(AddFilename) written, now at byte %zu\n", 
+                       stream.get_bytes_written());
+                fflush(stdout);
                 if (normalize_path) {
+                    printf("  [DEBUG] calling normalize_path...\n");
+                    fflush(stdout);
                     PyObject * normalized = PyObject_CallOneArg(normalize_path, filename);
+                    printf("  [DEBUG] normalize_path returned, now at byte %zu\n", 
+                           stream.get_bytes_written());
+                    fflush(stdout);
                     if (!normalized) {  
                         raise(SIGTRAP);
                         throw nullptr;
                     }
                     write(normalized);
+                    printf("  [DEBUG] write_filename END, string written, now at byte %zu\n", 
+                           stream.get_bytes_written());
+                    fflush(stdout);
                     Py_DECREF(normalized);
                 } else {
                     write(filename);
+                    printf("  [DEBUG] write_filename END (no normalize), now at byte %zu\n", 
+                           stream.get_bytes_written());
+                    fflush(stdout);
                 }
                 filename_index[Py_NewRef(filename)] = filename_index_counter++;
                 return true;
