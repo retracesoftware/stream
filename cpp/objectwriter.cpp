@@ -1,6 +1,7 @@
 #include "stream.h"
 #include "writer.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <structmember.h>
@@ -182,8 +183,10 @@ namespace retracesoftware_stream {
         void debug_prefix(size_t bytes_written = 0) {
             if (bytes_written == 0) {
                 bytes_written = stream.get_bytes_written();
+                printf("Retrace(%i) - ObjectWriter[%lu, %lu] -- ", ::pid(), messages_written, bytes_written);
+            } else {
+                printf("Retrace(%i) - ObjectWriter[%lu, %lu, %lu] -- ", ::pid(), messages_written, bytes_written, stream.get_bytes_written());
             }
-            printf("Retrace(%i) - ObjectWriter[%lu, %lu] -- ", ::pid(), messages_written, bytes_written);
         }
 
         static PyObject * StreamHandle_vectorcall(StreamHandle * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
@@ -231,11 +234,13 @@ namespace retracesoftware_stream {
                     write_filename(filename);
                 }
 
+                size_t before = stream.get_bytes_written();
+                stream.write_stacktrace(old_size - skip, new_frame_elements);
+
                 if (verbose) {
-                    debug_prefix();
+                    debug_prefix(before);
                     printf("STACKTRACE(%lu, %lu)\n", old_size - skip, new_frame_elements.size());
                 }                
-                stream.write_stacktrace(old_size - skip, new_frame_elements);
                 messages_written++;
             }
         }
@@ -334,13 +339,14 @@ namespace retracesoftware_stream {
         }
 
         void write_root(PyObject * obj) {
+            size_t before = stream.get_bytes_written();
+            stream.write(obj);
             if (verbose) {
-                debug_prefix();
+                debug_prefix(before);
                 PyObject * str = PyObject_Str(obj);
                 printf("%s\n", PyUnicode_AsUTF8(str));
                 Py_DECREF(str);
             }
-            stream.write(obj);
             write_magic();
             messages_written++;
         }

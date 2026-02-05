@@ -507,16 +507,24 @@ namespace retracesoftware_stream {
                     const char * name = FixedSizeTypes_Name(static_cast<FixedSizeTypes>(type));
 
                     if (name) {
-                        PyErr_Format(PyExc_RuntimeError, "unhandled subtype: %s for FixedSized", name);
+                        PyErr_Format(PyExc_RuntimeError, 
+                            "unhandled subtype: %s (0x%02X) for FixedSized at byte %zu, message %zu", 
+                            name, (unsigned)type, bytes_read, messages_read);
                     } else {
-                        PyErr_Format(PyExc_RuntimeError, "Unknown subtype: %i for FixedSized", type);
+                        PyErr_Format(PyExc_RuntimeError, 
+                            "Unknown subtype: %i (0x%02X) for FixedSized at byte %zu, message %zu", 
+                            type, (unsigned)type, bytes_read, messages_read);
                     }
                     throw nullptr;
             };
         }
 
         PyObject * read() {
-            return read(read_control());
+            Control control = read_control();
+            if (verbose > 1) {
+                printf("    read control: 0x%02X at byte %zu\n", control.raw, bytes_read - 1);
+            }
+            return read(control);
         }
 
         PyObject * read(Control control) {
@@ -560,13 +568,19 @@ namespace retracesoftware_stream {
                 start = bytes_read;
                 Control control = read_control();
                 
+                if (verbose > 1) {
+                    printf("  consume: control 0x%02X at byte %zu\n", control.raw, start);
+                }
+                
                 if (control == NewHandle) {
-                    if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed NEW_HANDLE\n", messages_read, start);
+                    if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed NEW_HANDLE", messages_read, start);
                     handles.push_back(read());
+                    if (verbose) printf(" -> read %zu bytes, now at %zu\n", bytes_read - start, bytes_read);
                     messages_read++;
                 } else if (control == AddFilename) {
-                    if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed ADD_FILENAME\n", messages_read, start);
+                    if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed ADD_FILENAME", messages_read, start);
                     filenames.push_back(read());
+                    if (verbose) printf(" -> read %zu bytes, now at %zu\n", bytes_read - start, bytes_read);
                     messages_read++;
                 } else if (control.Sized.type == SizedTypes::DELETE) {
                     if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Consumed DELETE\n", messages_read, start);
