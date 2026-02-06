@@ -1,7 +1,6 @@
 #include "stream.h"
 #include "wireformat.h"
 #include <chrono>
-#include <functional>
 #include <stdexcept>
 #include <utility>
 #include <thread>
@@ -45,6 +44,7 @@ namespace retracesoftware_stream {
         vectorcallfunc vectorcall;
         std::vector<PyObject *> handles;
         std::vector<PyObject *> filenames;
+        std::vector<PyObject *> interned_strings;  // For STR_REF lookups
 
         map<int, PyObject *> bindings;
         bool pending_bind = false;
@@ -132,6 +132,7 @@ namespace retracesoftware_stream {
 
             self->handles.std::vector<PyObject *>::~vector();
             self->filenames.std::vector<PyObject *>::~vector();
+            self->interned_strings.std::vector<PyObject *>::~vector();
             self->bindings.~map<int, PyObject *>();
 
             Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
@@ -157,6 +158,11 @@ namespace retracesoftware_stream {
                 Py_XDECREF(elem);
             }
             self->filenames.clear();
+
+            for (auto elem : self->interned_strings) {
+                Py_XDECREF(elem);
+            }
+            self->interned_strings.clear();
 
             Py_CLEAR(self->create_pickled);
             Py_CLEAR(self->bind_singleton);
@@ -430,7 +436,15 @@ namespace retracesoftware_stream {
                 case SizedTypes::LIST: return read_list(size);
                 case SizedTypes::DICT: return read_dict(size);
                 case SizedTypes::TUPLE: return read_tuple(size);
-                case SizedTypes::STR: return read_str(size);
+                case SizedTypes::STR: {
+                    // Read string and store for potential STR_REF later
+                    PyObject * str = read_str(size);
+                    interned_strings.push_back(Py_NewRef(str));
+                    return str;
+                }
+                case SizedTypes::STR_REF:
+                    // Reference to previously-read string
+                    return Py_NewRef(interned_strings[size]);
                 case SizedTypes::PICKLED: return read_pickled(size);
                 case SizedTypes::BIGINT: return read_bigint(size);
                 default:
@@ -694,8 +708,17 @@ namespace retracesoftware_stream {
         static PyObject* call(ObjectStream *self, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
             try {
                 return self->next();
+            } catch (std::exception &e) {
+                if (!PyErr_Occurred()) {
+                    fprintf(stderr, "SIGTRAP(ObjectStream::call): C++ exception: %s, bytes_read=%zu, messages_read=%zu\n", e.what(), self->bytes_read, self->messages_read);
+                    fflush(stderr);
+                    raise(SIGTRAP);
+                }
+                return nullptr;
             } catch (...) {
                 if (!PyErr_Occurred()) {
+                    fprintf(stderr, "SIGTRAP(ObjectStream::call): unknown exception, bytes_read=%zu, messages_read=%zu\n", self->bytes_read, self->messages_read);
+                    fflush(stderr);
                     raise(SIGTRAP);
                 }
                 return nullptr;
@@ -730,7 +753,6 @@ namespace retracesoftware_stream {
     static PyMethodDef methods[] = {
         {"bind", (PyCFunction)ObjectStream::py_bind, METH_O, "TODO"},
         {"close", (PyCFunction)ObjectStream::py_close, METH_NOARGS, "TODO"},
-        // {"exclude_from_stacktrace", (PyCFunction)ReaderWriterBase::py_exclude_from_stacktrace, METH_O, "TODO"},
         {NULL}  // Sentinel
     };
 

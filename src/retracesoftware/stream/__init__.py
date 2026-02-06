@@ -125,16 +125,13 @@ class writer(_backend_mod.ObjectWriter):
     def __init__(self, path, thread, 
                  flush_interval=0.1,
                  verbose=False, 
-                 stacktraces=False, 
                  magic_markers=False):
         
         super().__init__(path, thread=thread, serializer=self.serialize, 
                         verbose=verbose,
-                        stacktraces=stacktraces,
                         normalize_path=normalize_path,
                         magic_markers=magic_markers)
         
-        self.exclude_from_stacktrace(writer.serialize)
         self.type_serializer = {}
                 
         call_periodically(interval=flush_interval, func=self.flush)
@@ -176,24 +173,13 @@ class Bind(Control):
     pass
 
 
-class StackDelta:
-    __slots__ = ['to_drop', 'new_frames']
-
-    def __init__(self, to_drop, new_frames):
-        self.to_drop = to_drop
-        self.new_frames = new_frames
-
-
-class Stack(Control):
-    pass
-
-
 class ThreadSwitch(Control):
     pass
 
 
 def per_thread(source, thread, timeout):
-    stacks = {}
+    import retracesoftware.utils as utils
+
     is_thread_switch = functional.isinstanceof(ThreadSwitch)
     
     key_fn = StickyPred(
@@ -201,18 +187,8 @@ def per_thread(source, thread, timeout):
         extract=lambda ts: ts.value,
         initial=thread())
 
-    demux = _backend_mod.Demux(key_fn=key_fn, source=source, timeout=timeout)
-    is_stack_delta = functional.isinstanceof(StackDelta)
-
-    def create_stack(stack_delta):
-        prev = stacks.get(thread(), [])
-        common = prev[:-stack_delta.to_drop] if stack_delta.to_drop > 0 else prev
-        stack = common + stack_delta.new_frames
-        stacks[thread()] = stack
-        return Stack(stack)
-
-    expand_stack = functional.if_then_else(is_stack_delta, create_stack, functional.identity)
-    return drop(is_thread_switch, functional.sequence(thread, demux, expand_stack))
+    demux = utils.demux(source=source, key_function=key_fn, timeout_seconds=timeout)
+    return drop(is_thread_switch, functional.sequence(thread, demux))
 
 
 class reader1(_backend_mod.ObjectStreamReader):
@@ -223,7 +199,7 @@ class reader1(_backend_mod.ObjectStreamReader):
             deserialize=self.deserialize,
             bind_singleton=Bind(self.bind),
             on_thread_switch=ThreadSwitch,
-            create_stack_delta=StackDelta,
+            create_stack_delta=lambda to_drop, frames: None,
             read_timeout=read_timeout,
             verbose=verbose,
             magic_markers=magic_markers)
@@ -241,10 +217,6 @@ class reader1(_backend_mod.ObjectStreamReader):
             return self.type_deserializer[type(obj)](obj)
         else:
             return obj
-
-
-def stack(exclude):
-    return [(normalize_path(filename), lineno) for filename, lineno in _backend_mod.stack(exclude)]
 
 
 __all__ = sorted([k for k in globals().keys() if not k.startswith("_")])

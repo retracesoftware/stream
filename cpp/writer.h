@@ -5,7 +5,6 @@
 #include <system_error>
 #include <cerrno>
 #include <sstream>
-#include <span>
 
 namespace retracesoftware_stream {
 
@@ -416,8 +415,9 @@ namespace retracesoftware_stream {
         map<PyObject *, int> bindings;
         int binding_counter = 0;
 
-        map<PyObject *, uint16_t> filename_index;
-        int filename_index_counter = 0;
+        // Index for interned strings - allows deduplication using pointer identity
+        map<PyObject *, uint16_t> interned_index;
+        uint16_t interned_counter = 0;
 
         // PyThreadState * last_thread_state = nullptr;
         // retracesoftware::FastCall thread;
@@ -496,106 +496,17 @@ namespace retracesoftware_stream {
 
         ~MessageStream() {
             Py_XDECREF(serializer);
+            for (auto& [key, value] : interned_index) {
+                Py_DECREF(key);
+            }
         }
 
         void traverse(visitproc visit, void* arg) {
             if (serializer) visit(serializer, arg);
-        }
-
-        bool write_filename(PyObject * filename, PyObject * normalize_path) {
-            if (!filename_index.contains(filename)) {
-                // Add to index FIRST to prevent reentrancy during normalize_path callback.
-                // normalize_path may call wrapped functions which trigger write_stacktrace,
-                // which would call write_filename again for the same filename.
-                uint16_t index = filename_index_counter++;
-                filename_index[Py_NewRef(filename)] = index;
-                
-                stream.write_control(AddFilename);
-                if (normalize_path) {
-                    PyObject * normalized = PyObject_CallOneArg(normalize_path, filename);
-                    if (!normalized) {  
-                        raise(SIGTRAP);
-                        throw nullptr;
-                    }
-                    write(normalized);
-                    Py_DECREF(normalized);
-                } else {
-                    write(filename);
-                }
-                return true;
-            }
-            return false;
-        }
-
-        void write_stacktrace(size_t to_discard, std::span<Frame> new_elements) {
-            stream.write_control(Stack);
-
-            // how many to discard
-            stream.write_expected(to_discard);
-
-            stream.write_expected(new_elements.size());
-
-            for (auto frame : new_elements) {
-                PyObject * filename = frame.code_object->co_filename;
-                
-                stream.write(filename_index[filename]);
-                stream.write(frame.lineno());
+            for (auto& [key, value] : interned_index) {
+                visit(key, arg);
             }
         }
-
-        //     const set<PyObject *>& exclude_stacktrace, PyObject * normalize_path) {
-
-        //     static thread_local std::vector<Frame> stack;
-
-        //     size_t old_size = stack.size();
-        //     size_t skip = update_stack(exclude_stacktrace, stack);
-            
-        //     assert(skip <= old_size);
-
-        //     auto new_frame_elements = std::span(stack).subspan(skip);
-
-        //     for (auto frame : new_frame_elements) {
-        //         PyObject * filename = frame.code_object->co_filename;
-        //         assert(PyUnicode_Check(filename));
-
-        //         if (!filename_index.contains(filename)) {
-
-        //             stream.write_control(AddFilename);
-
-        //             if (normalize_path) {
-        //                 PyObject * normalized = PyObject_CallOneArg(normalize_path, filename);
-        //                 if (!normalized) {  
-        //                     raise(SIGTRAP);
-        //                     throw nullptr;
-        //                 }
-        //                 write(normalized);
-        //                 Py_DECREF(normalized);
-        //             } else {
-        //                 write(filename);
-        //             }
-        //             filename_index[Py_NewRef(filename)] = filename_index_counter++;
-
-        //             if (verbose) {
-        //                 printf("Retrace - ObjectWriter[%lu] -- ADD_FILENAME(%s)\n", messages_written, PyUnicode_AsUTF8(filename));
-        //             }
-        //         }
-        //     }
-
-        //     // one byte
-        //     stream.write_control(Stack);
-
-        //     // how many to discard
-        //     stream.write_expected(old_size - skip);
-
-        //     stream.write_expected(new_frame_elements.size());
-
-        //     for (auto frame : new_frame_elements) {
-        //         PyObject * filename = frame.code_object->co_filename;
-                
-        //         stream.write(filename_index[filename]);
-        //         stream.write(frame.lineno());
-        //     }
-        // }
 
         void write_handle_delete(int delta) {
             stream.write_unsigned_number(SizedTypes::DELETE, delta);
@@ -611,6 +522,26 @@ namespace retracesoftware_stream {
             stream.write_handle_ref(StreamHandle_index(obj));
         }
 
+        void write_string(PyObject * obj) {
+            assert(PyUnicode_Check(obj));
+            
+            // Check if string is interned - if so, we can deduplicate using pointer identity
+            if (PyUnicode_CHECK_INTERNED(obj)) {
+                auto it = interned_index.find(obj);
+                if (it != interned_index.end()) {
+                    // Already seen this interned string - write reference
+                    stream.write_size(SizedTypes::STR_REF, it->second);
+                    return;
+                }
+                // First occurrence of interned string - add to index
+                interned_index[Py_NewRef(obj)] = interned_counter;
+            }
+            // Write full string and increment counter
+            // Counter increments for ALL strings so reader indices match
+            stream.write_str(obj);
+            interned_counter++;
+        }
+
         void write(PyObject * obj) {
                         
             assert(obj);
@@ -618,7 +549,7 @@ namespace retracesoftware_stream {
             if (obj == Py_None) stream.write(FixedSizeTypes::NONE);
 
             else if (Py_TYPE(obj) == &StreamHandle_Type) write_stream_handle(obj);
-            else if (Py_TYPE(obj) == &PyUnicode_Type) stream.write_str(obj);
+            else if (Py_TYPE(obj) == &PyUnicode_Type) write_string(obj);
             else if (Py_TYPE(obj) == &PyLong_Type) stream.write_int(obj);
 
             else if (Py_TYPE(obj) == &PyBytes_Type) stream.write_bytes(obj);

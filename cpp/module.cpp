@@ -12,7 +12,6 @@ static PyTypeObject * hidden_types[] = {
 static PyTypeObject * exposed_types[] = {
     &retracesoftware_stream::ObjectWriter_Type,
     &retracesoftware_stream::ObjectStream_Type,
-    &retracesoftware_stream::Demux_Type,
     nullptr
 };
 
@@ -31,19 +30,9 @@ static PyObject * set_thread_id(PyObject * module, PyObject * id) {
     Py_RETURN_NONE;
 }
 
-static PyObject * stack(PyObject * module, PyObject * excludes) {
-    if (!PySet_Check(excludes)) {
-        PyErr_Format(PyExc_TypeError, "stack requires a set as a parameter, was passed: %", excludes);
-        return nullptr;
-    }
-
-    return retracesoftware_stream::stack(excludes);
-}
-
 static PyMethodDef module_methods[] = {
     {"thread_id", (PyCFunction)thread_id, METH_NOARGS, "TODO"},
     {"set_thread_id", (PyCFunction)set_thread_id, METH_O, "TODO"},
-    {"stack", (PyCFunction)stack, METH_O, "TODO"},
     // {"create_wrapping_proxy_type", (PyCFunction)create_wrapping_proxy_type, METH_VARARGS | METH_KEYWORDS, "TODO"},
     // {"unwrap_apply", (PyCFunction)unwrap_apply, METH_FASTCALL | METH_KEYWORDS, "Call the wrapped target with unproxied *args/**kwargs."},
     // {"thread_id", (PyCFunction)thread_id, METH_NOARGS, "TODO"},

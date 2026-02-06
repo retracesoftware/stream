@@ -158,7 +158,6 @@ namespace retracesoftware_stream {
         size_t messages_written = 0;
         int next_handle;
         PyThreadState * last_thread_state = nullptr;
-        bool stacktraces;
         int pid;
         bool verbose;
         PyObject * enable_when;
@@ -172,7 +171,8 @@ namespace retracesoftware_stream {
 
         // std::thread t1(thread_function, 1);
 
-        inline bool is_disabled() const { return path == Py_None; }
+        // Also check for nullptr: GC's tp_clear can set path to NULL before dealloc runs
+        inline bool is_disabled() const { return path == nullptr || path == Py_None; }
 
         void write_magic() { 
             if (magic_markers) {
@@ -204,54 +204,12 @@ namespace retracesoftware_stream {
             }
         }
         
-        void write_filename(PyObject * filename) {
-            size_t bytes_written = stream.get_bytes_written();
-
-            if (stream.write_filename(filename, normalize_path)) {
-                if (verbose) {
-                    debug_prefix(bytes_written);
-                    printf("ADD_FILENAME(%s)\n", PyUnicode_AsUTF8(filename));
-                }
-                messages_written++;
-            }
-        }
-
-        void write_stacktrace() {
-            if (!writing && stacktraces) {
-
-                static thread_local std::vector<Frame> stack;
-        
-                size_t old_size = stack.size();
-                size_t skip = update_stack(exclude_stacktrace, stack);
-                
-                assert(skip <= old_size);
-    
-                auto new_frame_elements = std::span(stack).subspan(skip);
-    
-                for (auto frame : new_frame_elements) {
-                    PyObject * filename = frame.code_object->co_filename;
-                    assert(PyUnicode_Check(filename));    
-                    write_filename(filename);
-                }
-
-                size_t before = stream.get_bytes_written();
-                stream.write_stacktrace(old_size - skip, new_frame_elements);
-
-                if (verbose) {
-                    debug_prefix(before);
-                    printf("STACKTRACE(%lu, %lu)\n", old_size - skip, new_frame_elements.size());
-                }                
-                messages_written++;
-            }
-        }
-
         void bind(PyObject * obj, bool ext) {
             if (is_disabled()) return;
 
             EnsureOutput output(this);
 
             check_thread();
-            write_stacktrace();
 
             Writing w;
 
@@ -286,7 +244,16 @@ namespace retracesoftware_stream {
         static void StreamHandle_dealloc(StreamHandle* self) {
             
             ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
-            writer->write_delete(self->index);
+
+            // Guard against unsafe dealloc during interpreter shutdown:
+            //  - writer may be NULL if GC called tp_clear before tp_dealloc
+            //  - writer may be disabled if its path was cleared
+            //  - during finalization, write_delete calls back into Python
+            //    (PyObject_Str, EnsureOutput) which is unsafe as objects are
+            //    being torn down in unpredictable order
+            if (writer && !writer->is_disabled() && !_Py_IsFinalizing()) {
+                writer->write_delete(self->index);
+            }
 
             PyObject_GC_UnTrack(self);
             StreamHandle::clear(self);
@@ -365,7 +332,6 @@ namespace retracesoftware_stream {
             EnsureOutput output(this);
 
             check_thread();
-            write_stacktrace();
 
             Writing w;
 
@@ -386,7 +352,6 @@ namespace retracesoftware_stream {
             EnsureOutput output(this);
 
             check_thread();
-            write_stacktrace();
 
             Writing w;
 
@@ -559,7 +524,6 @@ namespace retracesoftware_stream {
             PyObject * serializer = nullptr;
 
             int verbose = 0;
-            int stacktraces = 0;
             int magic_markers = 0;
             
             static const char* kwlist[] = {
@@ -567,19 +531,17 @@ namespace retracesoftware_stream {
                 "serializer", 
                 "thread", 
                 "verbose", 
-                "stacktraces", 
                 "normalize_path",
                 "magic_markers",
                 nullptr};  // Keywords allowed
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OppOp", (char **)kwlist, 
-                &path, &serializer, &thread, &verbose, &stacktraces, &normalize_path, &magic_markers)) {
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OpOp", (char **)kwlist, 
+                &path, &serializer, &thread, &verbose, &normalize_path, &magic_markers)) {
                 return -1;  
                 // Return NULL to propagate the parsing error
             }
 
             self->verbose = verbose;
-            self->stacktraces = stacktraces;
             self->magic_markers = magic_markers;
 
             self->path = Py_NewRef(path);
@@ -588,19 +550,12 @@ namespace retracesoftware_stream {
             Py_XINCREF(thread);
 
             self->messages_written = 0;
-            // enumtype(enumtype);
             self->next_handle = 0;
             
-            // new (&self->placeholders) map<PyObject *, uint64_t>();
-            // new (&self->type_serializers) map<PyTypeObject *, retracesoftware::FastCall>();
-
-            new (&self->exclude_stacktrace) set<PyObject *>();
             self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectWriter::py_vectorcall);
-            // self->last_thread_state = PyThreadState_Get();
 
             self->normalize_path = Py_XNewRef(normalize_path);
             self->enable_when = nullptr;
-            // self->stack_stop_at = 0;
 
             if (path != Py_None) {
                 PyObject * s = PyObject_Str(path);
@@ -610,9 +565,6 @@ namespace retracesoftware_stream {
 
             register_atfork_handlers();  // Ensure fork safety is set up
             writers.push_back(self);
-
-            // new (&self->cv) std::condition_variable();
-            // new (&self->flusher) std::thread(&ObjectWriter::flush_loop, self);
 
             return 0;
         }
@@ -648,7 +600,6 @@ namespace retracesoftware_stream {
         }
 
         static int traverse(ObjectWriter* self, visitproc visit, void* arg) {
-            // Py_VISIT(self->m_global_lookup);
             self->stream.traverse(visit, arg);
             Py_VISIT(self->thread.callable);
             Py_VISIT(self->path);
@@ -656,7 +607,6 @@ namespace retracesoftware_stream {
         }
 
         static int clear(ObjectWriter* self) {
-            // Py_CLEAR(self->name_cache);
             Py_CLEAR(self->thread.callable);
             Py_CLEAR(self->path);
             Py_CLEAR(self->normalize_path);
@@ -835,8 +785,6 @@ namespace retracesoftware_stream {
         {"bind", (PyCFunction)ObjectWriter::py_bind, METH_O, "TODO"},
         {"ext_bind", (PyCFunction)ObjectWriter::py_ext_bind, METH_O, "TODO"},
         // {"store_hash_secret", (PyCFunction)ObjectWriter::py_store_hash_secret, METH_NOARGS, "TODO"},
-        {"exclude_from_stacktrace", (PyCFunction)ReaderWriterBase::py_exclude_from_stacktrace, METH_O, "TODO"},
-
         // {"unique", (PyCFunction)ObjectWriter::py_unique, METH_O, "TODO"},
         // {"delete", (PyCFunction)ObjectWriter::py_delete, METH_O, "TODO"},
 
@@ -847,14 +795,9 @@ namespace retracesoftware_stream {
 
     static PyMemberDef members[] = {
         {"messages_written", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, messages_written), READONLY, "TODO"},
-        // {"stack_stop_at", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, stack_stop_at), 0, "TODO"},
-        {"stacktraces", T_BOOL, OFFSET_OF_MEMBER(ObjectWriter, stacktraces), 0, "TODO"},
         {"verbose", T_BOOL, OFFSET_OF_MEMBER(ObjectWriter, verbose), 0, "TODO"},
         {"normalize_path", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, normalize_path), 0, "TODO"},
         {"enable_when", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, enable_when), 0, "TODO"},
-
-        // {"path", T_OBJECT, OFFSET_OF_MEMBER(Writer, path), READONLY, "TODO"},
-        // {"on_pid_change", T_OBJECT_EX, OFFSET_OF_MEMBER(Writer, on_pid_change), 0, "TODO"},
         {NULL}  /* Sentinel */
     };
 

@@ -3,7 +3,6 @@
 // #include <nanobind/nanobind.h>
 
 #include <algorithm>
-#include <functional>
 #include <signal.h>
 #include <string>
 #include <vector>
@@ -86,71 +85,14 @@ namespace retracesoftware_stream {
         return list.release();  // transfer ownership to caller
     }    
 
-    // PyObject * all_gc_objects();
-    // PyObject * filter_gc_objects(std::function<bool(PyObject*)> pred);
-    // PyCodeObject * find_in_stack(std::function<bool (PyCodeObject *)> pred);
-
-    struct CodeLocation {
-        PyObject * filename;
-        uint16_t lineno;
-
-        CodeLocation(PyObject * filename,uint16_t lineno) : filename(filename), lineno(lineno) {}
-
-        bool operator==(const CodeLocation& other) const {
-            return lineno == other.lineno && !PyUnicode_Compare(filename, other.filename);
-        }
-
-        PyObject * as_tuple() const {
-            return PyTuple_Pack(2, Py_NewRef(filename), PyLong_FromLong(lineno));
-        }
-
-        bool operator!=(const CodeLocation& other) const {
-            return !(*this == other);
-        }
-    };
-
-    struct Frame {
-        uint16_t instruction;
-        PyCodeObject * code_object;
-        
-        // Frame() : instruction(0), code_object(nullptr) {}
-        Frame(PyCodeObject * code_object, uint16_t instruction) : 
-            instruction(instruction), code_object(code_object) {
-
-            assert(code_object);
-        }
-
-        uint16_t lineno() const {
-            return PyCode_Addr2Line(code_object, instruction);
-        }
-
-        CodeLocation location() const {
-            return CodeLocation(code_object->co_filename, lineno());
-        }
-
-        auto operator<=>(const Frame&) const = default;
-    };
-
-    PyObject * create_python_stack(std::vector<Frame> &stack);
-
-    size_t update_stack(const set<PyObject *> &exclude, std::vector<Frame> &stack);
-    std::vector<Frame> stack(const set<PyObject *> &exclude);
-    
     extern PyTypeObject ObjectWriter_Type;
     extern PyTypeObject ObjectReader_Type;
     extern PyTypeObject StreamHandle_Type;
     extern PyTypeObject ObjectStream_Type;
-    extern PyTypeObject Demux_Type;
 
     // extern PyTypeObject WeakRefCallback_Type;
     // extern PyTypeObject ObjectReader_Type;
 
-    // std::vector<Frame> stacktrace();
-
-    int stacksize(_PyInterpreterFrame * frame);
-    Frame * fill(Frame * data, _PyInterpreterFrame * frame);
-    PyObject * stack(PyObject *exclude);
-    
     inline void generic_gc_dealloc(PyObject *self) {
 
         PyObject_GC_UnTrack(self);

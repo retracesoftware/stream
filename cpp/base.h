@@ -37,23 +37,8 @@
 namespace retracesoftware_stream {
 
     struct ReaderWriterBase : public PyObject {
-        set<PyObject *> exclude_stacktrace;
-        int filename_index_counter;
         PyObject * path;
         PyObject * normalize_path;
         bool magic_markers;
-        // int stack_stop_at;
-
-        static PyObject * py_exclude_from_stacktrace(ReaderWriterBase * self, PyObject* obj) {
-            if (obj == nullptr || !PyFunction_Check(obj)) {
-                PyErr_Format(PyExc_TypeError, "py_exclude_from_stacktrace takes a function, was passed: %.100s", obj ? Py_TYPE(obj)->tp_name : "NULL");
-                return nullptr;
-            }
-            
-            if (!self->exclude_stacktrace.contains(obj)) {
-                self->exclude_stacktrace.insert(Py_NewRef(obj));
-            }
-            Py_RETURN_NONE;
-        }
     };
 }

@@ -32,6 +32,7 @@ namespace retracesoftware_stream {
 
         BINDING,
         BINDING_DELETE,
+        STR_REF,  // Reference to previously-written interned string
         FIXED_SIZE,
         SizedTypes__LAST__,
     };
@@ -249,6 +250,7 @@ namespace retracesoftware_stream {
 
             case SizedTypes::BINDING: return "BINDING";
             case SizedTypes::BINDING_DELETE: return "BINDING_DELETE";
+            case SizedTypes::STR_REF: return "STR_REF";
             case SizedTypes::FIXED_SIZE: return "FIXED_SIZE";
 
             default: return nullptr;
