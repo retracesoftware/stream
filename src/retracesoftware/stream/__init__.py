@@ -191,7 +191,7 @@ def per_thread(source, thread, timeout):
     return drop(is_thread_switch, functional.sequence(thread, demux))
 
 
-class reader1(_backend_mod.ObjectStreamReader):
+class reader(_backend_mod.ObjectStreamReader):
 
     def __init__(self, path, read_timeout, verbose, magic_markers=False):
         super().__init__(

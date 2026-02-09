@@ -17,7 +17,7 @@ def _thread_id() -> str:
 
 
 def _read_value(reader):
-    """Read the next non-control value from reader1."""
+    """Read the next non-control value from reader."""
     while True:
         val = reader()
         if not isinstance(val, (stream.Bind, stream.ThreadSwitch)):
@@ -37,7 +37,7 @@ def test_writer_reader_roundtrip(tmp_path):
         writer("hello", 123)
         writer.flush()
 
-    with stream.reader1(path, read_timeout=1, verbose=False) as reader:
+    with stream.reader(path, read_timeout=1, verbose=False) as reader:
         assert _read_value(reader) == "hello"
         assert _read_value(reader) == 123
 
@@ -69,7 +69,7 @@ def test_primitive_types(tmp_path):
             writer(val)
         writer.flush()
     
-    with stream.reader1(path, read_timeout=1, verbose=False) as reader:
+    with stream.reader(path, read_timeout=1, verbose=False) as reader:
         for expected in test_values:
             actual = _read_value(reader)
             if expected != expected:  # NaN check
@@ -104,7 +104,7 @@ def test_collections(tmp_path):
             writer(val)
         writer.flush()
     
-    with stream.reader1(path, read_timeout=1, verbose=False) as reader:
+    with stream.reader(path, read_timeout=1, verbose=False) as reader:
         for expected in test_values:
             actual = _read_value(reader)
             assert actual == expected, f"Expected {expected!r}, got {actual!r}"
@@ -127,7 +127,7 @@ def test_bytes(tmp_path):
             writer(val)
         writer.flush()
     
-    with stream.reader1(path, read_timeout=1, verbose=False) as reader:
+    with stream.reader(path, read_timeout=1, verbose=False) as reader:
         for expected in test_values:
             actual = _read_value(reader)
             assert actual == expected, f"Expected {expected!r}, got {actual!r}"
@@ -141,7 +141,7 @@ def test_multiple_writes_single_call(tmp_path):
         writer("a", "b", "c", 1, 2, 3)
         writer.flush()
     
-    with stream.reader1(path, read_timeout=1, verbose=False) as reader:
+    with stream.reader(path, read_timeout=1, verbose=False) as reader:
         assert _read_value(reader) == "a"
         assert _read_value(reader) == "b"
         assert _read_value(reader) == "c"
@@ -161,7 +161,7 @@ def test_large_data(tmp_path):
             writer(i, f"string_{i}", [i, i+1, i+2])
         writer.flush()
     
-    with stream.reader1(path, read_timeout=5, verbose=False) as reader:
+    with stream.reader(path, read_timeout=5, verbose=False) as reader:
         for i in range(num_values):
             assert _read_value(reader) == i
             assert _read_value(reader) == f"string_{i}"
