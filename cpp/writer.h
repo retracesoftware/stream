@@ -508,6 +508,14 @@ namespace retracesoftware_stream {
             }
         }
 
+        void gc_clear() {
+            Py_CLEAR(serializer);
+            for (auto& [key, value] : interned_index) {
+                Py_DECREF(key);
+            }
+            interned_index.clear();
+        }
+
         void write_handle_delete(int delta) {
             stream.write_unsigned_number(SizedTypes::DELETE, delta);
         }

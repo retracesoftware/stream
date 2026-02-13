@@ -64,8 +64,12 @@ def call_periodically(interval, func):
     sleep = time.sleep
 
     def run():
-        while (obj := ref()):
+        while True:
+            obj = ref()
+            if obj is None:
+                break
             obj()
+            del obj          # release strong ref before sleeping
             sleep(interval)
 
     threading.Thread(target=run, args=(), name="Retrace flush tracefile", daemon=True).start()

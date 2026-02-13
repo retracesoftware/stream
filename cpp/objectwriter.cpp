@@ -603,10 +603,12 @@ namespace retracesoftware_stream {
             self->stream.traverse(visit, arg);
             Py_VISIT(self->thread.callable);
             Py_VISIT(self->path);
+            Py_VISIT(self->normalize_path);
             return 0;
         }
 
         static int clear(ObjectWriter* self) {
+            self->stream.gc_clear();
             Py_CLEAR(self->thread.callable);
             Py_CLEAR(self->path);
             Py_CLEAR(self->normalize_path);
