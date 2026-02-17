@@ -512,18 +512,28 @@ namespace retracesoftware_stream {
             return 0;
         }
 
-        static PyObject * drop_mode_getter(ObjectWriter *self, void *closure) {
-            return PyBool_FromLong(self->stream.get_drop_mode());
+        static PyObject * backpressure_timeout_getter(ObjectWriter *self, void *closure) {
+            int64_t ns = self->stream.get_backpressure_timeout_ns();
+            if (ns < 0) Py_RETURN_NONE;
+            return PyFloat_FromDouble((double)ns / 1e9);
         }
 
-        static int drop_mode_setter(ObjectWriter *self, PyObject *value, void *closure) {
+        static int backpressure_timeout_setter(ObjectWriter *self, PyObject *value, void *closure) {
             if (value == nullptr) {
-                PyErr_SetString(PyExc_AttributeError, "deletion of 'drop_mode' is not allowed");
+                PyErr_SetString(PyExc_AttributeError, "deletion of 'backpressure_timeout' is not allowed");
                 return -1;
             }
-            int truthy = PyObject_IsTrue(value);
-            if (truthy < 0) return -1;
-            self->stream.set_drop_mode(truthy);
+            if (value == Py_None) {
+                self->stream.set_backpressure_timeout_ns(-1);
+                return 0;
+            }
+            double seconds = PyFloat_AsDouble(value);
+            if (seconds == -1.0 && PyErr_Occurred()) return -1;
+            if (seconds < 0) {
+                PyErr_SetString(PyExc_ValueError, "backpressure_timeout must be >= 0 or None");
+                return -1;
+            }
+            self->stream.set_backpressure_timeout_ns((int64_t)(seconds * 1e9));
             return 0;
         }
     };
@@ -596,7 +606,7 @@ namespace retracesoftware_stream {
         {"bytes_written", (getter)ObjectWriter::bytes_written_getter, nullptr, "TODO", NULL},
         {"path", (getter)ObjectWriter::path_getter, (setter)ObjectWriter::path_setter, "TODO", NULL},
         {"output", (getter)ObjectWriter::output_getter, (setter)ObjectWriter::output_setter, "Output callback", NULL},
-        {"drop_mode", (getter)ObjectWriter::drop_mode_getter, (setter)ObjectWriter::drop_mode_setter, "When true, drop messages under backpressure instead of blocking", NULL},
+        {"backpressure_timeout", (getter)ObjectWriter::backpressure_timeout_getter, (setter)ObjectWriter::backpressure_timeout_setter, "Timeout in seconds before dropping messages under backpressure (None=wait forever, 0=drop immediately)", NULL},
         {NULL}  // Sentinel
     };
 

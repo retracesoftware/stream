@@ -3,6 +3,7 @@
 #include "bufferslot.h"
 #include <vector>
 #include <cstring>
+#include <chrono>
 
 #if defined(__GNUC__) || defined(__clang__)
 #define STREAM_LIKELY(x)   __builtin_expect(!!(x), 1)
@@ -55,7 +56,8 @@ namespace retracesoftware_stream {
 
     public:
         uint64_t dropped_messages = 0;
-        bool drop_mode = false;
+        // -1 = wait forever, 0 = drop immediately, >0 = wait up to N ns then drop
+        int64_t backpressure_timeout_ns = -1;
 
         PrimitiveStream() = default;
 
@@ -108,6 +110,26 @@ namespace retracesoftware_stream {
             }
             if (slots[0]) { Py_DECREF(slots[0]); slots[0] = nullptr; }
             if (slots[1]) { Py_DECREF(slots[1]); slots[1] = nullptr; }
+        }
+
+        // Returns true if the slot became available, false if timeout expired (should drop).
+        // Caller must hold the GIL on entry; GIL is released during the wait.
+        inline bool wait_for_slot(int slot_idx) {
+            if (backpressure_timeout_ns == 0) return false;
+            if (backpressure_timeout_ns < 0) {
+                Py_BEGIN_ALLOW_THREADS
+                while (slots[slot_idx]->in_use.load(std::memory_order_acquire)) {}
+                Py_END_ALLOW_THREADS
+                return true;
+            }
+            auto deadline = std::chrono::steady_clock::now()
+                          + std::chrono::nanoseconds(backpressure_timeout_ns);
+            Py_BEGIN_ALLOW_THREADS
+            while (slots[slot_idx]->in_use.load(std::memory_order_acquire)) {
+                if (std::chrono::steady_clock::now() >= deadline) break;
+            }
+            Py_END_ALLOW_THREADS
+            return !slots[slot_idx]->in_use.load(std::memory_order_acquire);
         }
 
         void write_handle_ref(int handle) {
@@ -168,7 +190,7 @@ namespace retracesoftware_stream {
 
                     active = 1 - active;
                     if (slots[active]->in_use.load(std::memory_order_acquire)) {
-                        if (drop_mode) {
+                        if (!wait_for_slot(active)) {
                             dropped_messages += slots[full]->message_count;
                             memmove(slots[full]->data,
                                     slots[full]->data + message_boundary, tail);
@@ -178,10 +200,6 @@ namespace retracesoftware_stream {
                             active = full;
                             goto do_write;
                         }
-                        Py_BEGIN_ALLOW_THREADS
-                        while (slots[active]->in_use.load(std::memory_order_acquire)) {
-                        }
-                        Py_END_ALLOW_THREADS
                     }
 
                     memcpy(slots[active]->data, slots[full]->data + message_boundary, tail);
@@ -480,7 +498,7 @@ namespace retracesoftware_stream {
 
             active = 1 - active;
             if (slots[active]->in_use.load(std::memory_order_acquire)) {
-                if (drop_mode) {
+                if (!wait_for_slot(active)) {
                     dropped_messages += slots[full]->message_count;
                     write_pos = 0;
                     message_boundary = 0;
@@ -488,10 +506,6 @@ namespace retracesoftware_stream {
                     active = full;
                     return;
                 }
-                Py_BEGIN_ALLOW_THREADS
-                while (slots[active]->in_use.load(std::memory_order_acquire)) {
-                }
-                Py_END_ALLOW_THREADS
             }
             write_pos = 0;
             message_boundary = 0;
@@ -567,8 +581,48 @@ namespace retracesoftware_stream {
         map<PyObject *, uint16_t> interned_index;
         uint16_t interned_counter = 0;
 
+        static constexpr int MAX_WRITE_DEPTH = 64;
+        int write_depth = 0;
+
+        struct DepthGuard {
+            int& depth;
+            DepthGuard(int& d) : depth(d) { ++depth; }
+            ~DepthGuard() { --depth; }
+        };
+
+        static PyObject* pickle_dumps() {
+            static PyObject* dumps = nullptr;
+            if (!dumps) {
+                PyObject* mod = PyImport_ImportModule("pickle");
+                if (!mod) return nullptr;
+                dumps = PyObject_GetAttrString(mod, "dumps");
+                Py_DECREF(mod);
+            }
+            return dumps;
+        }
+
+        void pickle_fallback(PyObject * obj) {
+            PyObject* dumps = pickle_dumps();
+            if (dumps) {
+                PyObject* pickled = PyObject_CallOneArg(dumps, obj);
+                if (pickled) {
+                    stream.write_pickled(pickled);
+                    Py_DECREF(pickled);
+                    return;
+                }
+                PyErr_Clear();
+            }
+            stream.write(FixedSizeTypes::NONE);
+        }
+
         void write_dict(PyObject * obj) {
             assert(PyDict_Check(obj));
+
+            if (write_depth >= MAX_WRITE_DEPTH) {
+                pickle_fallback(obj);
+                return;
+            }
+            DepthGuard guard(write_depth);
 
             stream.write_dict_header(PyDict_Size(obj));
 
@@ -587,13 +641,19 @@ namespace retracesoftware_stream {
             stream.write_tuple_header(PyTuple_GET_SIZE(obj));
 
             for (int i = 0; i < PyTuple_GET_SIZE(obj); i++) {
-                assert(PyTuple_GET_ITEM(obj, i) != obj);
                 write(PyTuple_GET_ITEM(obj, i));
             }
         }
 
         void write_list(PyObject * obj) {
             assert(PyList_Check(obj));
+
+            if (write_depth >= MAX_WRITE_DEPTH) {
+                pickle_fallback(obj);
+                return;
+            }
+            DepthGuard guard(write_depth);
+
             stream.write_size(SizedTypes::LIST, PyList_GET_SIZE(obj));
             
             for (int i = 0; i < PyList_GET_SIZE(obj); i++) {
@@ -783,8 +843,8 @@ namespace retracesoftware_stream {
         uint64_t get_dropped_messages() const { return stream.dropped_messages; }
         void reset_dropped_messages() { stream.dropped_messages = 0; }
 
-        bool get_drop_mode() const { return stream.drop_mode; }
-        void set_drop_mode(bool mode) { stream.drop_mode = mode; }
+        int64_t get_backpressure_timeout_ns() const { return stream.backpressure_timeout_ns; }
+        void set_backpressure_timeout_ns(int64_t ns) { stream.backpressure_timeout_ns = ns; }
 
         void write_dropped_marker(uint64_t count) {
             stream.write(Dropped);

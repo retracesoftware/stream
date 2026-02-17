@@ -1,4 +1,4 @@
-"""Tests for backpressure drop mode, oversized messages, and message boundary framing."""
+"""Tests for backpressure timeout, oversized messages, and message boundary framing."""
 import pytest
 
 pytest.importorskip("retracesoftware.stream")
@@ -26,29 +26,40 @@ def _read_values(reader):
 
 
 # ---------------------------------------------------------------------------
-# drop_mode property
+# backpressure_timeout property
 # ---------------------------------------------------------------------------
 
-def test_drop_mode_defaults_to_false(tmp_path):
+def test_backpressure_timeout_defaults_to_none(tmp_path):
     path = tmp_path / "trace.bin"
     with stream.writer(path, thread=_thread_id) as w:
-        assert w.drop_mode is False
+        assert w.backpressure_timeout is None
 
 
-def test_drop_mode_property_writable(tmp_path):
+def test_backpressure_timeout_property_writable(tmp_path):
     path = tmp_path / "trace.bin"
     with stream.writer(path, thread=_thread_id) as w:
-        assert w.drop_mode is False
-        w.drop_mode = True
-        assert w.drop_mode is True
-        w.drop_mode = False
-        assert w.drop_mode is False
+        assert w.backpressure_timeout is None
+        w.backpressure_timeout = 0
+        assert w.backpressure_timeout == 0.0
+        w.backpressure_timeout = 0.05
+        assert abs(w.backpressure_timeout - 0.05) < 1e-6
+        w.backpressure_timeout = None
+        assert w.backpressure_timeout is None
 
 
-def test_backpressure_param_sets_drop_mode(tmp_path):
+def test_backpressure_timeout_param(tmp_path):
     path = tmp_path / "trace.bin"
-    with stream.writer(path, thread=_thread_id, backpressure="drop") as w:
-        assert w.drop_mode is True
+    with stream.writer(path, thread=_thread_id, backpressure_timeout=0) as w:
+        assert w.backpressure_timeout == 0.0
+    with stream.writer(path, thread=_thread_id, backpressure_timeout=0.1) as w:
+        assert abs(w.backpressure_timeout - 0.1) < 1e-6
+
+
+def test_backpressure_timeout_rejects_negative(tmp_path):
+    path = tmp_path / "trace.bin"
+    with stream.writer(path, thread=_thread_id) as w:
+        with pytest.raises(ValueError):
+            w.backpressure_timeout = -1
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +77,7 @@ def test_drop_mode_dropped_marker_roundtrip(tmp_path):
         held.append(data)
 
     w = stream.writer(output=holding_callback, thread=_thread_id,
-                      backpressure="drop", flush_interval=999)
+                      backpressure_timeout=0, flush_interval=999)
     w.__enter__()
 
     # Write enough small messages to fill BOTH 64KB buffers.  After the first
@@ -265,7 +276,7 @@ def test_dropped_without_callback_skips(tmp_path):
         held.append(data)
 
     w = stream.writer(output=holding_callback, thread=_thread_id,
-                      backpressure="drop", flush_interval=999)
+                      backpressure_timeout=0, flush_interval=999)
     w.__enter__()
 
     for i in range(15000):

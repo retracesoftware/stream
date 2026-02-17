@@ -155,7 +155,7 @@ class writer(_backend_mod.ObjectWriter):
                  verbose=False,
                  magic_markers=False,
                  disable_retrace=None,
-                 backpressure="wait"):
+                 backpressure_timeout=None):
 
         if output is None and path is not None:
             output = _backend_mod.AsyncFilePersister(str(path))
@@ -168,8 +168,7 @@ class writer(_backend_mod.ObjectWriter):
                         normalize_path=normalize_path,
                         magic_markers=magic_markers)
 
-        if backpressure == "drop":
-            self.drop_mode = True
+        self.backpressure_timeout = backpressure_timeout
 
         if path is not None:
             self.path = path
