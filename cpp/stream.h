@@ -89,6 +89,7 @@ namespace retracesoftware_stream {
     extern PyTypeObject ObjectReader_Type;
     extern PyTypeObject StreamHandle_Type;
     extern PyTypeObject ObjectStream_Type;
+    extern PyTypeObject AsyncFilePersister_Type;
 
     // extern PyTypeObject WeakRefCallback_Type;
     // extern PyTypeObject ObjectReader_Type;

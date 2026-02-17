@@ -166,3 +166,78 @@ def test_large_data(tmp_path):
             assert _read_value(reader) == i
             assert _read_value(reader) == f"string_{i}"
             assert _read_value(reader) == [i, i+1, i+2]
+
+
+def test_in_memory_callback(tmp_path):
+    """Test that the writer can use a custom in-memory callback instead of a file."""
+    chunks = []
+
+    with stream.writer(output=lambda data: chunks.append(bytes(data)),
+                       thread=_thread_id, flush_interval=0.01) as w:
+        w(42, "hello", [1, 2, 3])
+        w.flush()
+
+    # Verify we got some data
+    assert len(chunks) > 0
+    trace_bytes = b''.join(chunks)
+    assert len(trace_bytes) > 0
+
+    # Write the collected bytes to a temp file so the reader can consume them
+    trace = tmp_path / "trace.bin"
+    trace.write_bytes(trace_bytes)
+
+    with stream.reader(path=trace, read_timeout=1, verbose=False) as r:
+        assert _read_value(r) == 42
+        assert _read_value(r) == "hello"
+        assert _read_value(r) == [1, 2, 3]
+
+
+def test_custom_output_roundtrip(tmp_path):
+    """Full roundtrip using FileOutput explicitly."""
+    path = tmp_path / "trace.bin"
+    output = stream.FileOutput(path)
+
+    with stream.writer(output=output, thread=_thread_id, flush_interval=0.01) as w:
+        w("explicit", "file", "output")
+        w.flush()
+
+    with stream.reader(path=path, read_timeout=1, verbose=False) as r:
+        assert _read_value(r) == "explicit"
+        assert _read_value(r) == "file"
+        assert _read_value(r) == "output"
+
+
+def test_async_file_persister_explicit(tmp_path):
+    """Test explicit construction of AsyncFilePersister and roundtrip."""
+    import retracesoftware.stream as st
+
+    path = tmp_path / "async_trace.bin"
+    persister = st._backend_mod.AsyncFilePersister(str(path))
+
+    with stream.writer(output=persister, thread=_thread_id, flush_interval=0.01) as w:
+        w("async", "persister", 42)
+        w({"key": "value"}, [1, 2, 3])
+        w.flush()
+
+    with stream.reader(path=path, read_timeout=1, verbose=False) as r:
+        assert _read_value(r) == "async"
+        assert _read_value(r) == "persister"
+        assert _read_value(r) == 42
+        assert _read_value(r) == {"key": "value"}
+        assert _read_value(r) == [1, 2, 3]
+
+
+def test_async_persister_large_data(tmp_path):
+    """Test AsyncFilePersister with enough data to exercise double buffering."""
+    path = tmp_path / "large_trace.bin"
+
+    num_values = 5000
+    with stream.writer(path, thread=_thread_id, flush_interval=0.005) as w:
+        for i in range(num_values):
+            w(i, f"val_{i}")
+        w.flush()
+
+    with stream.reader(path=path, read_timeout=5, verbose=False) as r:
+        for i in range(num_values):
+            assert _read_value(r) == i
+            assert _read_value(r) == f"val_{i}"

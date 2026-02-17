@@ -3,19 +3,12 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <structmember.h>
 #include "wireformat.h"
 #include <algorithm>
-#include <sstream>
-#include <sys/file.h>
-
 #include <vector>
-#include <algorithm> 
 #include "unordered_dense.h"
 #include "base.h"
-#include <thread>
-#include <condition_variable>
 
 using namespace ankerl::unordered_dense;
 
@@ -41,20 +34,7 @@ namespace retracesoftware_stream {
 
     static std::vector<ObjectWriter *> writers;
 
-    // Forward declaration - defined after ObjectWriter struct
-    static void register_atfork_handlers();
-
-    // static void patch_dealloc(PyTypeObject * cls) {
-    //     assert(!is_patched(cls->tp_dealloc));
-    //     if (cls->tp_free == PyObject_Free) {
-    //         cls->tp_free = PyObject_Free_Wrapper;
-    //     } else if (cls->tp_free == PyObject_GC_Del) {
-    //         cls->tp_free = PyObject_GC_Del_Wrapper;
-    //     } else {
-    //         freefuncs[cls] = cls->tp_free;
-    //         cls->tp_free = generic_free;
-    //     }
-    // }
+    static void on_free(void * obj);
 
     struct StreamHandle : public PyObject {
         int index;
@@ -91,55 +71,17 @@ namespace retracesoftware_stream {
         }
     };
 
-    // static bool result_to_bool(PyObject * result) {
-    //     if (!result) throw nullptr;
-    //     int status = PyObject_IsTrue(result);
-    //     Py_DECREF(result);
-    //     switch (status) {
-    //         case 0: return false;
-    //         case 1: return true;
-    //         default:
-    //             throw nullptr;
-    //     }
-    // }
-    
-    struct ObjectWriter;
-
-    class EnsureOutput {
-    private:
-        // Stores the state returned by PyGILState_Ensure()
-        ObjectWriter * writer;
-
-    public:
-        // Constructor: Acquires the GIL
-        EnsureOutput(ObjectWriter * writer);
-
-        // Destructor: Releases the GIL
-        ~EnsureOutput();
-
-        // Deleted Copy/Move Constructors and Assignment Operators
-        // Prevents accidental copying or moving, as the GIL state should be unique
-        // to the scope and thread that created the guard.
-        inline EnsureOutput(const EnsureOutput&) = delete;
-        inline EnsureOutput& operator=(const EnsureOutput&) = delete;
-        inline EnsureOutput(EnsureOutput&&) = delete;
-        inline EnsureOutput& operator=(EnsureOutput&&) = delete;
-    };
-
     static thread_local bool writing = false;
 
     class Writing {
     private:
-        // Stores the state returned by PyGILState_Ensure()
         bool previous;
 
     public:
-        // Constructor: Acquires the GIL
         Writing() : previous(writing) {
             writing = true;
         }
 
-        // Destructor: Releases the GIL
         ~Writing() {
             writing = previous;
         }
@@ -154,25 +96,20 @@ namespace retracesoftware_stream {
         
         MessageStream stream;
 
-        // size_t bytes_written;
         size_t messages_written = 0;
         int next_handle;
         PyThreadState * last_thread_state = nullptr;
         int pid;
         bool verbose;
+        bool buffer_writes = true;
         PyObject * enable_when;
         retracesoftware::FastCall thread;
         vectorcallfunc vectorcall;
         PyObject *weakreflist;
-        // std::thread flusher;
-        // std::condition_variable cv;
-        // std::recursive_mutex write_lock;
         bool magic_markers;
 
-        // std::thread t1(thread_function, 1);
-
-        // Also check for nullptr: GC's tp_clear can set path to NULL before dealloc runs
-        inline bool is_disabled() const { return path == nullptr || path == Py_None; }
+        // Output callback is None or null when disabled (no-op mode)
+        inline bool is_disabled() const { return stream.is_closed(); }
 
         void write_magic() { 
             if (magic_markers) {
@@ -193,7 +130,6 @@ namespace retracesoftware_stream {
             
             ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
 
-            // No-op when disabled (path=None, performance testing mode)
             if (writer->is_disabled()) Py_RETURN_NONE;
 
             try {
@@ -206,8 +142,6 @@ namespace retracesoftware_stream {
         
         void bind(PyObject * obj, bool ext) {
             if (is_disabled()) return;
-
-            EnsureOutput output(this);
 
             check_thread();
 
@@ -227,8 +161,6 @@ namespace retracesoftware_stream {
         void write_delete(int id) {
             if (is_disabled()) return;
 
-            EnsureOutput output(this);
-
             if (verbose) {
                 debug_prefix();
                 printf("DELETE(%i)\n", id);
@@ -247,9 +179,9 @@ namespace retracesoftware_stream {
 
             // Guard against unsafe dealloc during interpreter shutdown:
             //  - writer may be NULL if GC called tp_clear before tp_dealloc
-            //  - writer may be disabled if its path was cleared
+            //  - writer may be disabled if its output was cleared
             //  - during finalization, write_delete calls back into Python
-            //    (PyObject_Str, EnsureOutput) which is unsafe as objects are
+            //    (PyObject_Str) which is unsafe as objects are
             //    being torn down in unpredictable order
             if (writer && !writer->is_disabled() && !_Py_IsFinalizing()) {
                 writer->write_delete(self->index);
@@ -303,6 +235,7 @@ namespace retracesoftware_stream {
             stream.write_stream_handle(obj);
             write_magic();
             messages_written++;
+            stream.mark_message_boundary();
         }
 
         void write_root(PyObject * obj) {
@@ -316,20 +249,18 @@ namespace retracesoftware_stream {
             }
             write_magic();
             messages_written++;
+            stream.mark_message_boundary();
         }
 
         void object_freed(PyObject * obj) {
             if (is_disabled()) return;
 
-            EnsureOutput output(this);
             if (stream.object_freed(obj)) {
                 messages_written++;
             }
         }
 
         void write_all(StreamHandle * self, PyObject *const * args, size_t nargs) {
-
-            EnsureOutput output(this);
 
             check_thread();
 
@@ -340,16 +271,8 @@ namespace retracesoftware_stream {
                 write_root(args[i]);
             }
         }
-    
-        void change_output() {
-            PyObject * s = PyObject_Str(path);
-            assert(s);
-            stream.change_output(PyUnicode_AsUTF8(s));
-            Py_DECREF(s);
-        }
 
         void write_all(PyObject*const * args, size_t nargs) {
-            EnsureOutput output(this);
 
             check_thread();
 
@@ -382,7 +305,6 @@ namespace retracesoftware_stream {
         }
 
         static PyObject* py_vectorcall(ObjectWriter* self, PyObject*const * args, size_t nargsf, PyObject* kwnames) {
-            // std::lock_guard<std::recursive_mutex> lock(self->write_lock);
 
             if (kwnames) {
                 PyErr_SetString(PyExc_TypeError, "ObjectWriter does not accept keyword arguments");
@@ -390,35 +312,21 @@ namespace retracesoftware_stream {
             }
          
             try {
+                uint64_t dropped = self->stream.get_dropped_messages();
+                if (dropped > 0) {
+                    self->stream.reset_dropped_messages();
+                    self->stream.write_dropped_marker(dropped);
+                    self->stream.mark_message_boundary();
+                }
                 self->write_all(args, PyVectorcall_NARGS(nargsf));
+                if (!self->buffer_writes) self->stream.flush();
                 Py_RETURN_NONE;
             } catch (...) {
                 return nullptr;
             }
-            // if (self->file) {
-            //     if (self->enabled()) {            
-            //         self->write_all(PyVectorcall_NARGS(nargsf), nargs);
-            //     }
-            //     Py_RETURN_NONE;
-
-            // } else {
-            //     self->file = open(self->path, true);
-
-            //     try {
-            //         PyObject * result =  py_vectorcall(self, args, nargsf, kwnames);
-            //         fclose(self->file);
-            //         self->file = nullptr;
-            //         return result;
-            //     } catch(...) {
-            //         fclose(self->file);
-            //         self->file = nullptr;                    
-            //         throw;
-            //     }
-            // }
         }
 
         static PyObject * py_flush(ObjectWriter * self, PyObject* unused) {
-            // std::lock_guard<std::recursive_mutex> lock(self->write_lock);
             try {
                 self->stream.flush();
                 Py_RETURN_NONE;
@@ -427,48 +335,7 @@ namespace retracesoftware_stream {
             }
         }
 
-        // static PyObject * py_close(ObjectWriter * self, PyObject* unused) {
-        //     // std::lock_guard<std::recursive_mutex> lock(self->write_lock);
-
-        //     if (stream.is_closed()) {
-        //         PyErr_Format(PyExc_RuntimeError, "File %S is already closed", self->file);
-        //         return nullptr;
-        //     }
-
-        //     if (self->file) {
-        //         fclose(self->file);
-        //         self->file = nullptr;
-        //     }
-        //     Py_RETURN_NONE;
-        // }
-
-        // static PyObject * py_reopen(ObjectWriter * self, PyObject* unused) {
-        //     std::lock_guard<std::recursive_mutex> lock(self->write_lock);
-        //     if (self->file) {
-        //         PyErr_Format(PyExc_RuntimeError, "File %S is already opened", self->file);
-        //         return nullptr;
-        //     }
-            
-        //     try {
-        //         self->file = open(self->path, true);
-        //         Py_RETURN_NONE;
-        //     } catch (...) {
-        //         return nullptr;
-        //     }
-        // }
-
-        // static PyObject * py_store_hash_secret(ObjectWriter * self, PyObject* unused) {                
-        //     try {
-        //         void *secret = &_Py_HashSecret;
-        //         self->write((const uint8_t *)secret, sizeof(_Py_HashSecret_t));
-        //         Py_RETURN_NONE;
-        //     } catch (...) {
-        //         return nullptr;
-        //     }
-        // }
-
         static PyObject * py_handle(ObjectWriter * self, PyObject* obj) {
-            // std::lock_guard<std::recursive_mutex> lock(self->write_lock);
             try {
                 return self->handle(obj);
             } catch (...) {
@@ -477,7 +344,6 @@ namespace retracesoftware_stream {
         }
 
         static PyObject * py_bind(ObjectWriter * self, PyObject* obj) {
-            // std::lock_guard<std::recursive_mutex> lock(self->write_lock);
             try {
                 self->bind(obj, false);
                 Py_RETURN_NONE;
@@ -487,7 +353,6 @@ namespace retracesoftware_stream {
         }
 
         static PyObject * py_ext_bind(ObjectWriter * self, PyObject* obj) {
-            // std::lock_guard<std::recursive_mutex> lock(self->write_lock);
             try {
                 self->bind(obj, true);
                 Py_RETURN_NONE;
@@ -496,28 +361,9 @@ namespace retracesoftware_stream {
             }
         }
 
-        // void flush_loop() {
-        //     std::lock_guard<std::mutex> lock(write_lock);
-
-        //     while (true)
-        //     {
-        //         cv.wait_for(write_lock, std::chrono::seconds(5), [this] { 
-        //             // The predicate: If this returns true, the wait immediately ends.
-        //             return should_exit_;
-        //         });
-
-        //         // If should_exit_ is true, break the loop
-        //         if (should_exit_) {
-        //             break; 
-        //         }
-        //     } // Lock is automatically released here
-        //     // If we woke up due to timeout (not exit signal), run the task
-        //     flush_file();
-        // }
-
         static int init(ObjectWriter * self, PyObject* args, PyObject* kwds) {
 
-            PyObject * path;
+            PyObject * output;
             
             PyObject * thread = nullptr;
             PyObject * normalize_path = nullptr;
@@ -527,25 +373,24 @@ namespace retracesoftware_stream {
             int magic_markers = 0;
             
             static const char* kwlist[] = {
-                "path", 
+                "output", 
                 "serializer", 
                 "thread", 
                 "verbose", 
                 "normalize_path",
                 "magic_markers",
-                nullptr};  // Keywords allowed
+                nullptr};
 
             if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OpOp", (char **)kwlist, 
-                &path, &serializer, &thread, &verbose, &normalize_path, &magic_markers)) {
+                &output, &serializer, &thread, &verbose, &normalize_path, &magic_markers)) {
                 return -1;  
-                // Return NULL to propagate the parsing error
             }
 
             self->verbose = verbose;
             self->magic_markers = magic_markers;
+            self->buffer_writes = true;
 
-            self->path = Py_NewRef(path);
-            // self->serializer = Py_NewRef(serializer);
+            self->path = Py_NewRef(Py_None);
             self->thread = thread ? retracesoftware::FastCall(thread) : retracesoftware::FastCall();
             Py_XINCREF(thread);
 
@@ -557,13 +402,14 @@ namespace retracesoftware_stream {
             self->normalize_path = Py_XNewRef(normalize_path);
             self->enable_when = nullptr;
 
-            if (path != Py_None) {
-                PyObject * s = PyObject_Str(path);
-                new (&self->stream) MessageStream(PyUnicode_AsUTF8(s), 0, serializer);
-                Py_DECREF(s);
+            if (output != Py_None) {
+                try {
+                    new (&self->stream) MessageStream(output, serializer);
+                } catch (...) {
+                    return -1;
+                }
             }
 
-            register_atfork_handlers();  // Ensure fork safety is set up
             writers.push_back(self);
 
             return 0;
@@ -616,15 +462,11 @@ namespace retracesoftware_stream {
         }
 
         static void dealloc(ObjectWriter* self) {
-            // lock 
             self->stream.close();
             
             if (self->weakreflist != NULL) {
                 PyObject_ClearWeakRefs((PyObject *)self);
             }
-
-            // cv.notify_one();
-            // thread.join();
 
             PyObject_GC_UnTrack(self);
             clear(self);
@@ -637,45 +479,15 @@ namespace retracesoftware_stream {
             }
         }
 
-
-        static PyObject * keep_open_getter(ObjectWriter *self, void *closure) {
-            return PyBool_FromLong(self->stream.is_closed() ? 0 : 1);
-        }
-
-        static int keep_open_setter(ObjectWriter *self, PyObject *value, void *closure) {
-            if (value == nullptr) {
-                PyErr_SetString(PyExc_AttributeError, "deletion of 'keep_open' is not allowed");
-                return -1;
-            }
-            if (!PyBool_Check(value)) {
-                PyErr_SetString(PyExc_AttributeError, "'keep_open' must be set with a boolean flag");
-                return -1;
-            }
-            bool flag = value == Py_True ? true : false;
-
-            if (flag && self->stream.is_closed()) {
-                self->change_output();
-
-            } else if (!flag && !self->stream.is_closed()) {
-                self->stream.close();
-            }            
-            return 0;
-        }
-
         static PyObject * bytes_written_getter(ObjectWriter *self, void *closure) {
             return PyLong_FromLong(self->stream.get_bytes_written());
         }
 
         static PyObject * path_getter(ObjectWriter *self, void *closure) {
-            // if (self->on_pid_change == NULL) {
-            //     PyErr_SetString(PyExc_AttributeError, "attribute 'on_pid_change' is not set");
-            //     return NULL;
-            // }
             return Py_NewRef(self->path);
         }
 
         static int path_setter(ObjectWriter *self, PyObject *value, void *closure) {
- 
             if (value == nullptr) {
                 PyErr_SetString(PyExc_AttributeError, "deletion of 'path' is not allowed");
                 return -1;
@@ -683,68 +495,38 @@ namespace retracesoftware_stream {
 
             Py_DECREF(self->path);
             self->path = Py_NewRef(value);
+            return 0;
+        }
 
-            if (!self->stream.is_closed()) {
-                self->change_output();
+        static PyObject * output_getter(ObjectWriter *self, void *closure) {
+            PyObject* cb = self->stream.get_output_callback();
+            return Py_NewRef(cb ? cb : Py_None);
+        }
+
+        static int output_setter(ObjectWriter *self, PyObject *value, void *closure) {
+            if (value == nullptr) {
+                PyErr_SetString(PyExc_AttributeError, "deletion of 'output' is not allowed");
+                return -1;
             }
+            self->stream.set_output_callback(value == Py_None ? nullptr : value);
+            return 0;
+        }
+
+        static PyObject * drop_mode_getter(ObjectWriter *self, void *closure) {
+            return PyBool_FromLong(self->stream.get_drop_mode());
+        }
+
+        static int drop_mode_setter(ObjectWriter *self, PyObject *value, void *closure) {
+            if (value == nullptr) {
+                PyErr_SetString(PyExc_AttributeError, "deletion of 'drop_mode' is not allowed");
+                return -1;
+            }
+            int truthy = PyObject_IsTrue(value);
+            if (truthy < 0) return -1;
+            self->stream.set_drop_mode(truthy);
             return 0;
         }
     };
-
-    EnsureOutput::EnsureOutput(ObjectWriter * writer) {
-        if (writer->stream.is_closed()) {
-            writer->change_output();
-            this->writer = writer;
-        } else {
-            this->writer = nullptr;
-        }
-    }
-
-    // Destructor: Releases the GIL
-    EnsureOutput::~EnsureOutput() {
-        if (writer) {
-            writer->stream.close();
-        }
-    }
-
-#ifndef _WIN32
-    #include <pthread.h>
-
-    // Fork safety: prevent child processes from corrupting parent's trace file
-    // 
-    // On fork(), child inherits parent's FILE* buffer. If child flushes (explicitly
-    // or on exit), it writes to parent's file, corrupting the trace.
-    //
-    // Solution:
-    // - prepare: flush all writers so parent's data is safely written
-    // - child: close fd without flush, abandon FILE* to prevent corruption
-
-    static void atfork_prepare() {
-        for (auto* w : writers) {
-            w->stream.flush();
-        }
-    }
-
-    static void atfork_child() {
-        for (auto* w : writers) {
-            w->stream.abandon_for_fork();
-        }
-        writers.clear();  // Child starts fresh - these writers are now invalid
-    }
-
-    static bool atfork_registered = false;
-
-    static void register_atfork_handlers() {
-        if (!atfork_registered) {
-            pthread_atfork(atfork_prepare, nullptr, atfork_child);
-            atfork_registered = true;
-        }
-    }
-#else
-    static void register_atfork_handlers() {
-        // Windows doesn't have fork() - CreateProcess doesn't inherit handles by default
-    }
-#endif
 
     static void on_free(void * obj) {
         for (ObjectWriter * writer : writers) {
@@ -761,6 +543,21 @@ namespace retracesoftware_stream {
         return reinterpret_cast<StreamHandle *>(streamhandle)->index;
     }
 
+    // --- BufferSlot type ---
+
+    PyTypeObject BufferSlot_Type = {
+        .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
+        .tp_name = MODULE "BufferSlot",
+        .tp_basicsize = sizeof(BufferSlot),
+        .tp_itemsize = 0,
+        .tp_dealloc = (destructor)BufferSlot::dealloc,
+        .tp_as_buffer = &BufferSlot_as_buffer,
+        .tp_flags = Py_TPFLAGS_DEFAULT,
+        .tp_doc = "Fixed-size buffer slot for serialization output",
+    };
+
+    // --- StreamHandle type ---
+
     PyTypeObject StreamHandle_Type = {
         .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
         .tp_name = MODULE "StreamHandle",
@@ -776,28 +573,20 @@ namespace retracesoftware_stream {
         .tp_members = StreamHandle_members,
     };
 
+    // --- ObjectWriter type ---
+
     static PyMethodDef methods[] = {
-        // {"add_type_serializer", (PyCFunction)ObjectWriter::py_add_type_serializer, METH_VARARGS | METH_KEYWORDS, "Creates handle"},
-        // {"placeholder", (PyCFunction)ObjectWriter::py_placeholder, METH_O, "Creates handle"},
         {"handle", (PyCFunction)ObjectWriter::py_handle, METH_O, "Creates handle"},
-        // {"write", (PyCFunction)ObjectWriter::py_write, METH_O, "Write's object returning a handle for future writes"},
-        {"flush", (PyCFunction)ObjectWriter::py_flush, METH_NOARGS, "TODO"},
-        // {"close", (PyCFunction)ObjectWriter::py_close, METH_NOARGS, "TODO"},
-        // {"reopen", (PyCFunction)ObjectWriter::py_reopen, METH_NOARGS, "TODO"},
+        {"flush", (PyCFunction)ObjectWriter::py_flush, METH_NOARGS, "Flush buffered data to the output callback"},
         {"bind", (PyCFunction)ObjectWriter::py_bind, METH_O, "TODO"},
         {"ext_bind", (PyCFunction)ObjectWriter::py_ext_bind, METH_O, "TODO"},
-        // {"store_hash_secret", (PyCFunction)ObjectWriter::py_store_hash_secret, METH_NOARGS, "TODO"},
-        // {"unique", (PyCFunction)ObjectWriter::py_unique, METH_O, "TODO"},
-        // {"delete", (PyCFunction)ObjectWriter::py_delete, METH_O, "TODO"},
-
-        // {"tuple", (PyCFunction)ObjectWriter::py_write_tuple, METH_FASTCALL, "TODO"},
-        // {"dict", (PyCFunction)ObjectWriter::, METH_FASTCALL | METH_KEYWORDS, "TODO"},
         {NULL}  // Sentinel
     };
 
     static PyMemberDef members[] = {
         {"messages_written", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectWriter, messages_written), READONLY, "TODO"},
         {"verbose", T_BOOL, OFFSET_OF_MEMBER(ObjectWriter, verbose), 0, "TODO"},
+        {"buffer_writes", T_BOOL, OFFSET_OF_MEMBER(ObjectWriter, buffer_writes), 0, "When false, flush after every write"},
         {"normalize_path", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, normalize_path), 0, "TODO"},
         {"enable_when", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, enable_when), 0, "TODO"},
         {NULL}  /* Sentinel */
@@ -806,9 +595,8 @@ namespace retracesoftware_stream {
     static PyGetSetDef getset[] = {
         {"bytes_written", (getter)ObjectWriter::bytes_written_getter, nullptr, "TODO", NULL},
         {"path", (getter)ObjectWriter::path_getter, (setter)ObjectWriter::path_setter, "TODO", NULL},
-        {"keep_open", (getter)ObjectWriter::keep_open_getter, (setter)ObjectWriter::keep_open_setter, "TODO", NULL},
-
-        // {"thread_number", (getter)Writer::thread_getter, (setter)Writer::thread_setter, "TODO", NULL},
+        {"output", (getter)ObjectWriter::output_getter, (setter)ObjectWriter::output_setter, "Output callback", NULL},
+        {"drop_mode", (getter)ObjectWriter::drop_mode_getter, (setter)ObjectWriter::drop_mode_setter, "When true, drop messages under backpressure instead of blocking", NULL},
         {NULL}  // Sentinel
     };
 

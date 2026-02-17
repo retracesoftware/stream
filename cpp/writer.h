@@ -1,70 +1,113 @@
 #include "stream.h"
 #include "wireformat.h"
-#include <sys/fcntl.h>
-#include <sys/file.h>
-#include <system_error>
-#include <cerrno>
-#include <sstream>
+#include "bufferslot.h"
+#include <vector>
+#include <cstring>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define STREAM_LIKELY(x)   __builtin_expect(!!(x), 1)
+#else
+#define STREAM_LIKELY(x)   (x)
+#endif
 
 namespace retracesoftware_stream {
 
-    static FILE * open(const char * path, bool append) {
-
-        assert(path);
-
-        const char * mode = append ? "ab" : "wb";
-
-        FILE * file = fopen(path, mode);
-
-        if (!file) {
-            PyErr_Format(PyExc_IOError, "Could not open file: %S, mode: %s for writing, error: %s", path, mode, strerror(errno));
-            throw nullptr;
-        }
-
-        int fd = fileno(file);
-        
-        if (flock(fd, LOCK_EX | LOCK_NB) == -1) {
-            fprintf(stderr, "TRIED TO LOCK AN ALREADY LOCKED FILE!!!!\n");
-
-            PyErr_Format(PyExc_IOError, "Could not lock file: %S for exclusive access, error: %s", path, strerror(errno));
-            // perror("flock");
-            // // Handle locking failure: another process holds the lock
-            fclose(file);
-            throw nullptr;
-        }
-        return file;
+    // Wire format is little-endian.  On LE systems these are identity
+    // functions that the compiler will elide entirely.  On BE systems
+    // they byte-swap so the on-disk format is always LE.
+    inline uint16_t to_le(uint16_t v) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        return __builtin_bswap16(v);
+#else
+        return v;
+#endif
+    }
+    inline uint32_t to_le(uint32_t v) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        return __builtin_bswap32(v);
+#else
+        return v;
+#endif
+    }
+    inline uint64_t to_le(uint64_t v) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        return __builtin_bswap64(v);
+#else
+        return v;
+#endif
     }
 
     int StreamHandle_index(PyObject *);
 
     class PrimitiveStream {
-        FILE * file;
+        static constexpr size_t BUFFER_SIZE = BUFFER_SLOT_SIZE;
+
+        BufferSlot* slots[2] = {nullptr, nullptr};
+        int active = 0;
+        size_t write_pos = 0;
         size_t bytes_written = 0;
-        int write_timeout;
+        PyObject* output_callback = nullptr;
         bool verbose = false;
 
+        size_t message_boundary = 0;
+        std::vector<uint8_t> overflow;
+        std::vector<uint8_t>* large_write_buffer = nullptr;
+
     public:
-        PrimitiveStream(const char * path, int write_timeout) : 
-            file(open(path, false)),
-            write_timeout(write_timeout) {}
+        uint64_t dropped_messages = 0;
+        bool drop_mode = false;
+
+        PrimitiveStream() = default;
+
+        PrimitiveStream(PyObject* output_callback) :
+            output_callback(Py_XNewRef(output_callback)) {
+
+            slots[0] = (BufferSlot*)BufferSlot_Type.tp_alloc(&BufferSlot_Type, 0);
+            slots[1] = (BufferSlot*)BufferSlot_Type.tp_alloc(&BufferSlot_Type, 0);
+
+            if (slots[0]) {
+                slots[0]->in_use.store(false, std::memory_order_relaxed);
+                slots[0]->used = 0;
+                slots[0]->message_count = 0;
+            }
+            if (slots[1]) {
+                slots[1]->in_use.store(false, std::memory_order_relaxed);
+                slots[1]->used = 0;
+                slots[1]->message_count = 0;
+            }
+            if (!slots[0] || !slots[1]) {
+                Py_XDECREF(slots[0]);
+                Py_XDECREF(slots[1]);
+                slots[0] = slots[1] = nullptr;
+                Py_XDECREF(output_callback);
+                this->output_callback = nullptr;
+                throw nullptr;
+            }
+        }
 
         ~PrimitiveStream() { close(); }
 
         inline size_t get_bytes_written() const { return this->bytes_written; }
 
-        void change_output(const char * path) {
-            if (file) {
-                fclose(file);
-                file = nullptr;
-            }
-            file = open(path, true);
+        void traverse(visitproc visit, void* arg) {
+            if (output_callback) visit(output_callback, arg);
+            if (slots[0]) visit((PyObject*)slots[0], arg);
+            if (slots[1]) visit((PyObject*)slots[1], arg);
+        }
+
+        void gc_clear() {
+            Py_CLEAR(output_callback);
+            if (slots[0]) { Py_DECREF(slots[0]); slots[0] = nullptr; }
+            if (slots[1]) { Py_DECREF(slots[1]); slots[1] = nullptr; }
         }
 
         void close() {
-            if (file) {
-                fclose(file);
-                file = nullptr;
+            if (output_callback) {
+                flush();
+                Py_CLEAR(output_callback);
             }
+            if (slots[0]) { Py_DECREF(slots[0]); slots[0] = nullptr; }
+            if (slots[1]) { Py_DECREF(slots[1]); slots[1] = nullptr; }
         }
 
         void write_handle_ref(int handle) {
@@ -106,27 +149,75 @@ namespace retracesoftware_stream {
         }
 
         inline void write(const uint8_t * bytes, Py_ssize_t size) {
-
             assert(bytes);
-            assert(file);
 
-            // if (pid && pid != getpid()) {
-            //     fprintf(stderr, "TRIED TO WRITE TO FILE WHERE PID ISN'T OWNED!!!!!\n");
-            // }
-
-            // assert (!pid || pid == getpid());
-
-            int written = fwrite(bytes, 1, size, file);
-
-            bytes_written += written;
-
-            if (written < size) {
-                std::ostringstream error;
-
-                error << "Write failed, tried to write: " << size << " bytes but wrote: " << written << " bytes";
-
-                throw error.str();
+            if (large_write_buffer) {
+                large_write_buffer->insert(large_write_buffer->end(), bytes, bytes + size);
+                bytes_written += size;
+                return;
             }
+
+            assert(output_callback);
+
+            if (write_pos + (size_t)size > BUFFER_SIZE) {
+                if (message_boundary > 0) {
+                    size_t tail = write_pos - message_boundary;
+
+                    int full = active;
+                    slots[full]->used = message_boundary;
+
+                    active = 1 - active;
+                    if (slots[active]->in_use.load(std::memory_order_acquire)) {
+                        if (drop_mode) {
+                            dropped_messages += slots[full]->message_count;
+                            memmove(slots[full]->data,
+                                    slots[full]->data + message_boundary, tail);
+                            write_pos = tail;
+                            message_boundary = 0;
+                            slots[full]->message_count = 0;
+                            active = full;
+                            goto do_write;
+                        }
+                        Py_BEGIN_ALLOW_THREADS
+                        while (slots[active]->in_use.load(std::memory_order_acquire)) {
+                        }
+                        Py_END_ALLOW_THREADS
+                    }
+
+                    memcpy(slots[active]->data, slots[full]->data + message_boundary, tail);
+                    write_pos = tail;
+                    message_boundary = 0;
+                    slots[full]->message_count = 0;
+
+                    PyObject* mv = PyMemoryView_FromObject((PyObject*)slots[full]);
+                    if (!mv) throw nullptr;
+                    PyObject* result = PyObject_CallOneArg(output_callback, mv);
+                    Py_DECREF(mv);
+                    if (!result) throw nullptr;
+                    Py_DECREF(result);
+
+                } else {
+                    overflow.assign(slots[active]->data,
+                                    slots[active]->data + write_pos);
+                    large_write_buffer = &overflow;
+                    write_pos = 0;
+
+                    large_write_buffer->insert(large_write_buffer->end(),
+                                               bytes, bytes + size);
+                    bytes_written += size;
+                    return;
+                }
+            }
+
+        do_write:
+            if (write_pos + (size_t)size > BUFFER_SIZE) {
+                write(bytes, size);
+                return;
+            }
+
+            memcpy(slots[active]->data + write_pos, bytes, size);
+            write_pos += size;
+            bytes_written += size;
         }
 
         void write_lookup(int ref) {
@@ -134,32 +225,42 @@ namespace retracesoftware_stream {
         }
 
         inline void write(uint8_t value) {
+            if (STREAM_LIKELY(!large_write_buffer && write_pos < BUFFER_SIZE)) {
+                slots[active]->data[write_pos++] = value;
+                bytes_written++;
+                return;
+            }
             write(&value, sizeof(value));
         }
 
         inline void write(int8_t value) {
-            return write((uint8_t)value);
+            write((uint8_t)value);
         }
 
         inline void write(uint16_t value) {
-            uint8_t buffer[sizeof(value)];
-            buffer[0] = (uint8_t)value;
-            buffer[1] = (uint8_t)(value >> 8);
-            write(buffer, sizeof(value));
+            value = to_le(value);
+            if (STREAM_LIKELY(!large_write_buffer && write_pos + sizeof(value) <= BUFFER_SIZE)) {
+                memcpy(slots[active]->data + write_pos, &value, sizeof(value));
+                write_pos += sizeof(value);
+                bytes_written += sizeof(value);
+                return;
+            }
+            write(reinterpret_cast<const uint8_t*>(&value), (Py_ssize_t)sizeof(value));
         }
 
         inline void write(int16_t value) {
-            return write((uint16_t)value);
+            write((uint16_t)value);
         }
 
         inline void write(uint32_t value) {
-            uint8_t buffer[sizeof(value)];
-            buffer[0] = (uint8_t)value;
-            buffer[1] = (uint8_t)(value >> 8);
-            buffer[2] = (uint8_t)(value >> 16);
-            buffer[3] = (uint8_t)(value >> 24);
-
-            write(buffer, sizeof(value));
+            value = to_le(value);
+            if (STREAM_LIKELY(!large_write_buffer && write_pos + sizeof(value) <= BUFFER_SIZE)) {
+                memcpy(slots[active]->data + write_pos, &value, sizeof(value));
+                write_pos += sizeof(value);
+                bytes_written += sizeof(value);
+                return;
+            }
+            write(reinterpret_cast<const uint8_t*>(&value), (Py_ssize_t)sizeof(value));
         }
 
         inline void write(int32_t value) {
@@ -167,16 +268,14 @@ namespace retracesoftware_stream {
         }
 
         inline void write(uint64_t value) {
-            uint8_t buffer[sizeof(value)];
-            buffer[0] = (uint8_t)value;
-            buffer[1] = (uint8_t)(value >> 8);
-            buffer[2] = (uint8_t)(value >> 16);
-            buffer[3] = (uint8_t)(value >> 24);
-            buffer[4] = (uint8_t)(value >> 32);
-            buffer[5] = (uint8_t)(value >> 40);
-            buffer[6] = (uint8_t)(value >> 48);
-            buffer[7] = (uint8_t)(value >> 56);
-            write(buffer, sizeof(value));
+            value = to_le(value);
+            if (STREAM_LIKELY(!large_write_buffer && write_pos + sizeof(value) <= BUFFER_SIZE)) {
+                memcpy(slots[active]->data + write_pos, &value, sizeof(value));
+                write_pos += sizeof(value);
+                bytes_written += sizeof(value);
+                return;
+            }
+            write(reinterpret_cast<const uint8_t*>(&value), (Py_ssize_t)sizeof(value));
         }
 
         void write(int64_t value) {
@@ -184,7 +283,9 @@ namespace retracesoftware_stream {
         }
 
         void write(double d) {
-            write(*(uint64_t *)&d);
+            uint64_t bits;
+            memcpy(&bits, &d, sizeof(bits));
+            write(bits);
         }
 
         void write_control(Control value) {
@@ -197,7 +298,6 @@ namespace retracesoftware_stream {
 
         void write_bignum(PyObject * pylong) {
 
-            // _PyLong_NumBits()
             Py_ssize_t nbits = _PyLong_NumBits(pylong);
             size_t expected = (nbits + 7) / 8;
 
@@ -208,18 +308,17 @@ namespace retracesoftware_stream {
                 throw nullptr;
             }
 
-            // Safely get the entire value.
             int little_endian = 0;
             int is_signed = 1;
 
             int bytes = _PyLong_AsByteArray(reinterpret_cast<PyLongObject *>(pylong), bignum, expected, little_endian, is_signed);
 
-            if (bytes < 0) {  // Exception has been set.
+            if (bytes < 0) {
                 free(bignum);
                 throw nullptr;
             }
             
-            else if ((size_t)bytes > expected) {  // This should not be possible.
+            else if ((size_t)bytes > expected) {
                 PyErr_SetString(PyExc_RuntimeError,
                     "Unexpected bignum truncation after a size check.");
                 free(bignum);
@@ -229,8 +328,6 @@ namespace retracesoftware_stream {
             try {
                 write_size(SizedTypes::BIGINT, expected);
                 write((const uint8_t *) bignum, expected);
-                // The expected success given the above pre-check.
-                // ... use bignum ...
                 free(bignum);
             } catch (...) {
                 free(bignum);
@@ -241,6 +338,20 @@ namespace retracesoftware_stream {
         void write_str(PyObject * obj) {
             Py_ssize_t size;
             const char * utf8 = PyUnicode_AsUTF8AndSize(obj, &size);
+
+            if (STREAM_LIKELY(!verbose && size <= 11 && !large_write_buffer
+                              && write_pos + 1 + (size_t)size <= BUFFER_SIZE)) {
+                Control control;
+                control.Sized.type = SizedTypes::STR;
+                control.Sized.size = (Sizes)size;
+                uint8_t* dst = slots[active]->data + write_pos;
+                dst[0] = control.raw;
+                memcpy(dst + 1, utf8, size);
+                write_pos += 1 + size;
+                bytes_written += 1 + size;
+                return;
+            }
+
             write_size(SizedTypes::STR, (int)size);
             write((const uint8_t *)utf8, size);
         }
@@ -291,8 +402,6 @@ namespace retracesoftware_stream {
         }
 
         void write_pickled(PyObject * bytes) {
-
-            // assert(PyType_Check(bytes, &PyBytes_Type));
             write_size(SizedTypes::PICKLED, PyBytes_GET_SIZE(bytes));
             write_bytes_data(bytes);
         }
@@ -321,11 +430,6 @@ namespace retracesoftware_stream {
             write_size(SizedTypes::DICT, size);
         }
 
-        // void write_bytes_written(uint64_t bytes_written) {
-        //     write_control(RootTypes::BYTES_WRITTEN);
-        //     write(bytes_written);
-        // }
-
         void write_unsigned_number(SizedTypes type, uint64_t l) {
             write_size(type, l);
         }
@@ -348,22 +452,66 @@ namespace retracesoftware_stream {
             write(create_fixed_size(obj));
         }
 
-        bool is_closed() { return file == nullptr; }
+        bool is_closed() const { return output_callback == nullptr; }
 
-        void flush() { 
-            if (file) {
-                fflush(file);
+        void mark_message_boundary() {
+            if (large_write_buffer) {
+                PyObject* bytes_obj = PyBytes_FromStringAndSize(
+                    (const char*)large_write_buffer->data(),
+                    large_write_buffer->size());
+                large_write_buffer->clear();
+                large_write_buffer = nullptr;
+                if (!bytes_obj) throw nullptr;
+
+                PyObject* result = PyObject_CallOneArg(output_callback, bytes_obj);
+                Py_DECREF(bytes_obj);
+                if (!result) throw nullptr;
+                Py_DECREF(result);
             }
+            message_boundary = write_pos;
+            if (slots[active]) slots[active]->message_count++;
         }
 
-        // For use in forked child: close fd without flushing buffer
-        // This prevents child from corrupting parent's trace file
-        void abandon_for_fork() {
-            if (file) {
-                int fd = fileno(file);
-                ::close(fd);  // Close fd first - prevents any writes
-                file = nullptr;  // Abandon FILE* without fclose (avoids flush)
+        void flush() {
+            if (write_pos == 0 || !output_callback) return;
+
+            int full = active;
+            slots[full]->used = write_pos;
+
+            active = 1 - active;
+            if (slots[active]->in_use.load(std::memory_order_acquire)) {
+                if (drop_mode) {
+                    dropped_messages += slots[full]->message_count;
+                    write_pos = 0;
+                    message_boundary = 0;
+                    slots[full]->message_count = 0;
+                    active = full;
+                    return;
+                }
+                Py_BEGIN_ALLOW_THREADS
+                while (slots[active]->in_use.load(std::memory_order_acquire)) {
+                }
+                Py_END_ALLOW_THREADS
             }
+            write_pos = 0;
+            message_boundary = 0;
+            slots[full]->message_count = 0;
+
+            PyObject* mv = PyMemoryView_FromObject((PyObject*)slots[full]);
+            if (!mv) throw nullptr;
+
+            PyObject* result = PyObject_CallOneArg(output_callback, mv);
+            Py_DECREF(mv);
+
+            if (!result) throw nullptr;
+            Py_DECREF(result);
+        }
+
+        PyObject* get_output_callback() const { return output_callback; }
+
+        void set_output_callback(PyObject* cb) {
+            Py_XDECREF(output_callback);
+            output_callback = Py_XNewRef(cb);
         }
     };
 
@@ -418,9 +566,6 @@ namespace retracesoftware_stream {
         // Index for interned strings - allows deduplication using pointer identity
         map<PyObject *, uint16_t> interned_index;
         uint16_t interned_counter = 0;
-
-        // PyThreadState * last_thread_state = nullptr;
-        // retracesoftware::FastCall thread;
 
         void write_dict(PyObject * obj) {
             assert(PyDict_Check(obj));
@@ -482,16 +627,13 @@ namespace retracesoftware_stream {
 
     public:
         
-        MessageStream(
-            const char * path,
-            int write_timeout,
-            PyObject * serializer) : 
-            stream(path, write_timeout), 
-            serializer(Py_XNewRef(serializer)) {
+        MessageStream() = default;
 
-            // thread(retracesoftware::FastCall(thread)) {
-            // Py_XINCREF(thread);
-            // last_thread_state = PyThreadState_Get();
+        MessageStream(
+            PyObject * output_callback,
+            PyObject * serializer) : 
+            stream(output_callback), 
+            serializer(Py_XNewRef(serializer)) {
         }
 
         ~MessageStream() {
@@ -502,6 +644,7 @@ namespace retracesoftware_stream {
         }
 
         void traverse(visitproc visit, void* arg) {
+            stream.traverse(visit, arg);
             if (serializer) visit(serializer, arg);
             for (auto& [key, value] : interned_index) {
                 visit(key, arg);
@@ -509,6 +652,7 @@ namespace retracesoftware_stream {
         }
 
         void gc_clear() {
+            stream.gc_clear();
             Py_CLEAR(serializer);
             for (auto& [key, value] : interned_index) {
                 Py_DECREF(key);
@@ -599,7 +743,6 @@ namespace retracesoftware_stream {
             } else {
                 stream.write(Bind);
             }
-            // write_magic();
         }
 
         bool object_freed(PyObject * obj) {
@@ -607,7 +750,6 @@ namespace retracesoftware_stream {
 
             // is there an integer binding for this?
             if (it != bindings.end()) {
-                // check_thread();
                 stream.write_unsigned_number(SizedTypes::BINDING_DELETE, it->second);
                 bindings.erase(it);
                 return true;
@@ -626,16 +768,27 @@ namespace retracesoftware_stream {
 
         inline size_t get_bytes_written() const { return stream.get_bytes_written(); }
 
-        void change_output(const char * path) {
-            stream.change_output(path);
-        }
-
-        bool is_closed() { return stream.is_closed(); }
+        bool is_closed() const { return stream.is_closed(); }
 
         void close() { stream.close(); }
 
         void flush() { stream.flush(); }
 
-        void abandon_for_fork() { stream.abandon_for_fork(); }
+        PyObject* get_output_callback() const { return stream.get_output_callback(); }
+
+        void set_output_callback(PyObject* cb) { stream.set_output_callback(cb); }
+
+        void mark_message_boundary() { stream.mark_message_boundary(); }
+
+        uint64_t get_dropped_messages() const { return stream.dropped_messages; }
+        void reset_dropped_messages() { stream.dropped_messages = 0; }
+
+        bool get_drop_mode() const { return stream.drop_mode; }
+        void set_drop_mode(bool mode) { stream.drop_mode = mode; }
+
+        void write_dropped_marker(uint64_t count) {
+            stream.write(Dropped);
+            stream.write_sized_int(count);
+        }
     };
 }

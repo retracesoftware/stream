@@ -54,6 +54,7 @@ namespace retracesoftware_stream {
         PyObject * bind_singleton;
         PyObject * create_stack_delta;
         PyObject * create_thread_switch;
+        PyObject * create_dropped = nullptr;
         bool verbose = false;
 
         static int init(ObjectStream * self, PyObject* args, PyObject* kwds) {
@@ -63,6 +64,7 @@ namespace retracesoftware_stream {
             PyObject * bind_singleton;
             PyObject * create_stack_delta;
             PyObject * create_thread_switch;
+            PyObject * create_dropped = nullptr;
 
             int magic_markers = 0;
             int read_timeout = 0;
@@ -77,9 +79,10 @@ namespace retracesoftware_stream {
                 "read_timeout",
                 "magic_markers",
                 "verbose",
-                nullptr};  // Keywords allowed
+                "on_dropped",
+                nullptr};
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOKpp", (char **)kwlist, 
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOKpp|O", (char **)kwlist, 
                 &PyUnicode_Type, &path, 
                 &create_pickled,
                 &bind_singleton,
@@ -87,7 +90,8 @@ namespace retracesoftware_stream {
                 &create_thread_switch,
                 &read_timeout,
                 &magic_markers,
-                &verbose)) {
+                &verbose,
+                &create_dropped)) {
                 return -1;
             }
 
@@ -99,6 +103,7 @@ namespace retracesoftware_stream {
             self->bind_singleton = Py_NewRef(bind_singleton);
             self->create_stack_delta = Py_NewRef(create_stack_delta);
             self->create_thread_switch = Py_NewRef(create_thread_switch);
+            self->create_dropped = Py_XNewRef(create_dropped);
             self->read_timeout = read_timeout;
             self->verbose = verbose;
 
@@ -143,6 +148,7 @@ namespace retracesoftware_stream {
             Py_VISIT(self->bind_singleton);
             Py_VISIT(self->create_stack_delta);
             Py_VISIT(self->create_thread_switch);
+            Py_VISIT(self->create_dropped);
 
             return 0;
         }
@@ -168,6 +174,7 @@ namespace retracesoftware_stream {
             Py_CLEAR(self->bind_singleton);
             Py_CLEAR(self->create_stack_delta);
             Py_CLEAR(self->create_thread_switch);
+            Py_CLEAR(self->create_dropped);
 
             return 0;
         }
@@ -685,6 +692,22 @@ namespace retracesoftware_stream {
                 Py_DECREF(thread);
                 return result;
             }
+            if (control == Dropped) {
+                PyObject * count = read();
+                if (verbose) {
+                    PyObject * s = PyObject_Str(count);
+                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed DROPPED(%s)\n", messages_read, start, PyUnicode_AsUTF8(s));
+                    Py_DECREF(s);
+                }
+                messages_read++;
+                if (create_dropped) {
+                    PyObject * result = PyObject_CallOneArg(create_dropped, count);
+                    Py_DECREF(count);
+                    return result;
+                }
+                Py_DECREF(count);
+                return next();
+            }
             if (control == Bind) {
                 if (verbose) printf("Retrace - ObjectStream[%lu, %lu] - Read BIND\n", messages_read, start);
 
@@ -710,16 +733,12 @@ namespace retracesoftware_stream {
                 return self->next();
             } catch (std::exception &e) {
                 if (!PyErr_Occurred()) {
-                    fprintf(stderr, "SIGTRAP(ObjectStream::call): C++ exception: %s, bytes_read=%zu, messages_read=%zu\n", e.what(), self->bytes_read, self->messages_read);
-                    fflush(stderr);
-                    raise(SIGTRAP);
+                    PyErr_SetString(PyExc_RuntimeError, e.what());
                 }
                 return nullptr;
             } catch (...) {
                 if (!PyErr_Occurred()) {
-                    fprintf(stderr, "SIGTRAP(ObjectStream::call): unknown exception, bytes_read=%zu, messages_read=%zu\n", self->bytes_read, self->messages_read);
-                    fflush(stderr);
-                    raise(SIGTRAP);
+                    PyErr_SetString(PyExc_RuntimeError, "Unknown C++ exception in ObjectStream");
                 }
                 return nullptr;
             }

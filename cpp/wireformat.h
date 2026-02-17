@@ -83,8 +83,9 @@ namespace retracesoftware_stream {
         STACK,
         ADD_FILENAME,
         CHECKSUM,
+        DROPPED,
 
-        FixedSizeTypes__LAST__, // 7
+        FixedSizeTypes__LAST__,
     };
 
     // enum RootOnlyTypes : uint8_t {
@@ -142,6 +143,7 @@ namespace retracesoftware_stream {
     constexpr Control Empty = ThreadSwitch;
 
     constexpr Control Checksum = create_fixed_size(FixedSizeTypes::CHECKSUM);
+    constexpr Control Dropped = create_fixed_size(FixedSizeTypes::DROPPED);
     constexpr Control Bind = create_fixed_size(FixedSizeTypes::BIND);
     constexpr Control ExtBind = create_fixed_size(FixedSizeTypes::EXT_BIND);
     // constexpr Control BindingDelete = create_fixed_size(FixedSizeTypes::);
@@ -225,6 +227,7 @@ namespace retracesoftware_stream {
             case FixedSizeTypes::STACK: return "STACK";
             case FixedSizeTypes::ADD_FILENAME: return "ADD_FILENAME";
             case FixedSizeTypes::CHECKSUM: return "CHECKSUM";
+            case FixedSizeTypes::DROPPED: return "DROPPED";
             default: return nullptr;
         }
     }

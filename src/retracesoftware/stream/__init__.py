@@ -124,29 +124,102 @@ def get_path_info():
     }
 
 
+class FileOutput:
+    """Default output callback -- writes to a file with exclusive lock."""
+
+    def __init__(self, path, append=False):
+        import fcntl
+        mode = 'ab' if append else 'wb'
+        self._file = open(str(path), mode)
+        fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def __call__(self, data):
+        self._file.write(data)
+
+    def close(self):
+        if self._file:
+            self._file.close()
+            self._file = None
+
+
+def _append_write(path, data):
+    """Fork-safe synchronous writer: opens in append mode, writes, closes."""
+    with open(str(path), 'ab') as f:
+        f.write(data)
+
+
 class writer(_backend_mod.ObjectWriter):
 
-    def __init__(self, path, thread, 
+    def __init__(self, path=None, thread=None, output=None,
                  flush_interval=0.1,
-                 verbose=False, 
-                 magic_markers=False):
-        
-        super().__init__(path, thread=thread, serializer=self.serialize, 
+                 verbose=False,
+                 magic_markers=False,
+                 disable_retrace=None,
+                 backpressure="wait"):
+
+        if output is None and path is not None:
+            output = _backend_mod.AsyncFilePersister(str(path))
+
+        self._output = output
+        self._disable_retrace = disable_retrace
+
+        super().__init__(output, thread=thread, serializer=self.serialize,
                         verbose=verbose,
                         normalize_path=normalize_path,
                         magic_markers=magic_markers)
-        
+
+        if backpressure == "drop":
+            self.drop_mode = True
+
+        if path is not None:
+            self.path = path
+
         self.type_serializer = {}
-                
+
         call_periodically(interval=flush_interval, func=self.flush)
-    
+
+        if path is not None and hasattr(os, 'register_at_fork'):
+            os.register_at_fork(
+                before=self._before_fork,
+                after_in_parent=self._after_fork_parent,
+                after_in_child=self._after_fork_child,
+            )
+
     def __enter__(self): return self
 
     def __exit__(self, *args):
-        self.keep_open = False
+        self.flush()
+        if hasattr(self, '_output') and self._output and hasattr(self._output, 'close'):
+            self._output.close()
 
     def serialize(self, obj):
         return self.type_serializer.get(type(obj), pickle.dumps)(obj)
+
+    # -- Fork safety ----------------------------------------------------------
+
+    def _before_fork(self):
+        self.flush()
+        if hasattr(self._output, 'close'):
+            self._output.close()
+        self._output = None
+        dr = self._disable_retrace
+        if dr:
+            def safe_write(data):
+                with dr:
+                    _append_write(self.path, data)
+            self.output = safe_write
+        else:
+            self.output = lambda data: _append_write(self.path, data)
+        self.buffer_writes = False
+
+    def _after_fork_parent(self):
+        self._output = _backend_mod.AsyncFilePersister(str(self.path), append=True)
+        self.output = self._output
+        self.buffer_writes = True
+
+    def _after_fork_child(self):
+        self.output = None
+        self._output = None
 
 
 class StickyPred:
@@ -181,6 +254,10 @@ class ThreadSwitch(Control):
     pass
 
 
+class Dropped(Control):
+    pass
+
+
 def per_thread(source, thread, timeout):
     import retracesoftware.utils as utils
 
@@ -206,7 +283,8 @@ class reader(_backend_mod.ObjectStreamReader):
             create_stack_delta=lambda to_drop, frames: None,
             read_timeout=read_timeout,
             verbose=verbose,
-            magic_markers=magic_markers)
+            magic_markers=magic_markers,
+            on_dropped=Dropped)
 
         self.type_deserializer = {}
 

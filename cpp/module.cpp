@@ -1,17 +1,17 @@
 #include "stream.h"
+#include "bufferslot.h"
 #include "wireformat.h"
-// #include "gateway.h"
 
 static PyTypeObject * hidden_types[] = {
-    // &_proxy::Pickled_Type,
+    &retracesoftware_stream::BufferSlot_Type,
     &retracesoftware_stream::StreamHandle_Type,
-    // &retracesoftware_stream::WeakRefCallback_Type,
     nullptr
 };
 
 static PyTypeObject * exposed_types[] = {
     &retracesoftware_stream::ObjectWriter_Type,
     &retracesoftware_stream::ObjectStream_Type,
+    &retracesoftware_stream::AsyncFilePersister_Type,
     nullptr
 };
 
