@@ -312,7 +312,6 @@ def test_dropped_without_callback_skips(tmp_path):
         create_stack_delta=lambda to_drop, frames: None,
         on_thread_switch=stream.ThreadSwitch,
         read_timeout=1,
-        magic_markers=False,
         verbose=False,
     )
     values = []

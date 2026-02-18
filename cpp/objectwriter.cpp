@@ -106,16 +106,9 @@ namespace retracesoftware_stream {
         retracesoftware::FastCall thread;
         vectorcallfunc vectorcall;
         PyObject *weakreflist;
-        bool magic_markers;
 
         // Output callback is None or null when disabled (no-op mode)
         inline bool is_disabled() const { return stream.is_closed(); }
-
-        void write_magic() { 
-            if (magic_markers) {
-                stream.write_magic();
-            }
-        }
 
         void debug_prefix(size_t bytes_written = 0) {
             if (bytes_written == 0) {
@@ -130,7 +123,9 @@ namespace retracesoftware_stream {
             
             ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
 
-            if (writer->is_disabled()) Py_RETURN_NONE;
+            if (writer->is_disabled()) {
+                Py_RETURN_NONE;
+            }
 
             try {
                 writer->write_all(self, args, PyVectorcall_NARGS(nargsf));
@@ -155,7 +150,6 @@ namespace retracesoftware_stream {
 
             stream.bind(obj, ext);
             messages_written++;
-            write_magic();
         }
 
         void write_delete(int id) {
@@ -233,7 +227,6 @@ namespace retracesoftware_stream {
                 Py_DECREF(str);
             }
             stream.write_stream_handle(obj);
-            write_magic();
             messages_written++;
             stream.mark_message_boundary();
         }
@@ -247,7 +240,6 @@ namespace retracesoftware_stream {
                 printf("%s\n", PyUnicode_AsUTF8(str));
                 Py_DECREF(str);
             }
-            write_magic();
             messages_written++;
             stream.mark_message_boundary();
         }
@@ -368,9 +360,9 @@ namespace retracesoftware_stream {
             PyObject * thread = nullptr;
             PyObject * normalize_path = nullptr;
             PyObject * serializer = nullptr;
+            PyObject * preamble = nullptr;
 
             int verbose = 0;
-            int magic_markers = 0;
             
             static const char* kwlist[] = {
                 "output", 
@@ -378,16 +370,15 @@ namespace retracesoftware_stream {
                 "thread", 
                 "verbose", 
                 "normalize_path",
-                "magic_markers",
+                "preamble",
                 nullptr};
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OpOp", (char **)kwlist, 
-                &output, &serializer, &thread, &verbose, &normalize_path, &magic_markers)) {
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OpOO", (char **)kwlist, 
+                &output, &serializer, &thread, &verbose, &normalize_path, &preamble)) {
                 return -1;  
             }
 
             self->verbose = verbose;
-            self->magic_markers = magic_markers;
             self->buffer_writes = true;
 
             self->path = Py_NewRef(Py_None);
@@ -405,6 +396,15 @@ namespace retracesoftware_stream {
             if (output != Py_None) {
                 try {
                     new (&self->stream) MessageStream(output, serializer);
+                } catch (...) {
+                    return -1;
+                }
+            }
+
+            if (preamble && preamble != Py_None && !self->is_disabled()) {
+                try {
+                    self->write_root(preamble);
+                    self->stream.flush();
                 } catch (...) {
                     return -1;
                 }

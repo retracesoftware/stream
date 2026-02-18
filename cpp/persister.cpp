@@ -12,12 +12,22 @@
     #include <unistd.h>
     #include <fcntl.h>
     #include <sys/file.h>
+    #include <sys/stat.h>
+    #include <limits.h>
+#endif
+
+#ifndef PIPE_BUF
+#define PIPE_BUF 512
 #endif
 
 namespace retracesoftware_stream {
 
+    static constexpr size_t FRAME_HEADER_SIZE = 6;  // 4-byte PID + 2-byte payload length
+    static constexpr size_t MAX_FRAME_PAYLOAD = PIPE_BUF - FRAME_HEADER_SIZE;
+
     struct AsyncFilePersister : PyObject {
         int fd;
+        bool is_fifo;
         std::thread writer_thread;
         std::mutex mtx;
         std::condition_variable cv;
@@ -32,6 +42,16 @@ namespace retracesoftware_stream {
         bool shutdown;
         bool closed;
         std::string stored_path;
+
+        uint8_t frame_buf[PIPE_BUF];
+
+        void stamp_pid() {
+            uint32_t pid = (uint32_t)::getpid();
+            frame_buf[0] = (uint8_t)(pid);
+            frame_buf[1] = (uint8_t)(pid >> 8);
+            frame_buf[2] = (uint8_t)(pid >> 16);
+            frame_buf[3] = (uint8_t)(pid >> 24);
+        }
 
         static void writer_loop(AsyncFilePersister* self) {
             while (true) {
@@ -48,18 +68,33 @@ namespace retracesoftware_stream {
                     self->queue.pop_front();
                 }
 
-                // Write to file -- no GIL needed, pure syscall
                 const uint8_t* ptr = (const uint8_t*)item.data;
                 size_t remaining = item.size;
+
                 while (remaining > 0) {
-                    ssize_t written = ::write(self->fd, ptr, remaining);
-                    if (written < 0) {
-                        if (errno == EINTR) continue;
-                        perror("AsyncFilePersister: write failed");
+                    uint16_t chunk = (uint16_t)std::min(remaining, MAX_FRAME_PAYLOAD);
+
+                    self->frame_buf[4] = (uint8_t)(chunk);
+                    self->frame_buf[5] = (uint8_t)(chunk >> 8);
+                    memcpy(self->frame_buf + FRAME_HEADER_SIZE, ptr, chunk);
+
+                    size_t frame_size = FRAME_HEADER_SIZE + chunk;
+                    while (true) {
+                        ssize_t written = ::write(self->fd, self->frame_buf, frame_size);
+                        if (written < 0) {
+                            if (errno == EINTR) continue;
+                            perror("AsyncFilePersister: write failed");
+                            break;
+                        }
+                        if ((size_t)written != frame_size) {
+                            fprintf(stderr, "AsyncFilePersister: short write (%zd of %zu)\n",
+                                    written, frame_size);
+                        }
                         break;
                     }
-                    ptr += written;
-                    remaining -= written;
+
+                    ptr += chunk;
+                    remaining -= chunk;
                 }
 
                 // Release the memoryview (needs GIL).
@@ -129,12 +164,50 @@ namespace retracesoftware_stream {
             Py_RETURN_NONE;
         }
 
+        void do_drain() {
+            if (closed) return;
+
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                shutdown = true;
+            }
+            cv.notify_one();
+
+            if (writer_thread.joinable()) {
+                Py_BEGIN_ALLOW_THREADS
+                writer_thread.join();
+                Py_END_ALLOW_THREADS
+            }
+
+            // Thread stopped, queue drained, but fd stays open.
+            // Reset state so resume() can restart.
+            shutdown = false;
+        }
+
+        void do_resume() {
+            if (closed || fd < 0) return;
+            stamp_pid();
+            writer_thread = std::thread(writer_loop, this);
+        }
+
+        static PyObject* py_drain(AsyncFilePersister* self, PyObject* unused) {
+            self->do_drain();
+            Py_RETURN_NONE;
+        }
+
+        static PyObject* py_resume(AsyncFilePersister* self, PyObject* unused) {
+            self->do_resume();
+            Py_RETURN_NONE;
+        }
+
         static PyObject* tp_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
             AsyncFilePersister* self = (AsyncFilePersister*)type->tp_alloc(type, 0);
             if (self) {
                 self->fd = -1;
+                self->is_fifo = false;
                 self->shutdown = false;
                 self->closed = true;
+                memset(self->frame_buf, 0, FRAME_HEADER_SIZE);
                 new (&self->writer_thread) std::thread();
                 new (&self->mtx) std::mutex();
                 new (&self->cv) std::condition_variable();
@@ -153,7 +226,12 @@ namespace retracesoftware_stream {
                 return -1;
             }
 
-            int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+            struct stat st;
+            bool path_is_fifo = (::stat(path, &st) == 0 && S_ISFIFO(st.st_mode));
+
+            int flags = O_WRONLY;
+            if (!path_is_fifo) flags |= O_CREAT | (append ? O_APPEND : O_TRUNC);
+
             self->fd = ::open(path, flags, 0644);
             if (self->fd < 0) {
                 PyErr_Format(PyExc_IOError,
@@ -161,17 +239,22 @@ namespace retracesoftware_stream {
                 return -1;
             }
 
-            if (flock(self->fd, LOCK_EX | LOCK_NB) == -1) {
-                PyErr_Format(PyExc_IOError,
-                    "Could not lock file: %s for exclusive access: %s", path, strerror(errno));
-                ::close(self->fd);
-                self->fd = -1;
-                return -1;
+            self->is_fifo = path_is_fifo;
+
+            if (!path_is_fifo) {
+                if (flock(self->fd, LOCK_EX | LOCK_NB) == -1) {
+                    PyErr_Format(PyExc_IOError,
+                        "Could not lock file: %s for exclusive access: %s", path, strerror(errno));
+                    ::close(self->fd);
+                    self->fd = -1;
+                    return -1;
+                }
             }
 
             self->stored_path = path;
             self->shutdown = false;
             self->closed = false;
+            self->stamp_pid();
             self->writer_thread = std::thread(writer_loop, self);
 
             return 0;
@@ -197,14 +280,28 @@ namespace retracesoftware_stream {
             self->stored_path.c_str(), self->stored_path.size());
     }
 
+    static PyObject* AsyncFilePersister_fd_getter(PyObject* obj, void*) {
+        return PyLong_FromLong(((AsyncFilePersister*)obj)->fd);
+    }
+
+    static PyObject* AsyncFilePersister_is_fifo_getter(PyObject* obj, void*) {
+        return PyBool_FromLong(((AsyncFilePersister*)obj)->is_fifo);
+    }
+
     static PyMethodDef AsyncFilePersister_methods[] = {
         {"close", (PyCFunction)AsyncFilePersister::py_close, METH_NOARGS,
          "Flush pending writes, join writer thread, close file"},
+        {"drain", (PyCFunction)AsyncFilePersister::py_drain, METH_NOARGS,
+         "Drain queue and stop writer thread, keeping the fd open"},
+        {"resume", (PyCFunction)AsyncFilePersister::py_resume, METH_NOARGS,
+         "Start a new writer thread on the existing fd"},
         {NULL}
     };
 
     static PyGetSetDef AsyncFilePersister_getset[] = {
         {"path", AsyncFilePersister_path_getter, nullptr, "File path", NULL},
+        {"fd", AsyncFilePersister_fd_getter, nullptr, "Underlying file descriptor", NULL},
+        {"is_fifo", AsyncFilePersister_is_fifo_getter, nullptr, "True if the output is a named pipe", NULL},
         {NULL}
     };
 

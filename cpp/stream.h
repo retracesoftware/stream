@@ -19,8 +19,6 @@
 #define alloca _alloca
 #endif
 
-#define MAGIC 0x8E78ACE50F73A8E
-
 #define MODULE "retracesoftware_stream."
 
 #define OFFSET_OF_MEMBER(type, member) \

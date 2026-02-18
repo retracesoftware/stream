@@ -817,10 +817,6 @@ namespace retracesoftware_stream {
             return false;
         }
 
-        void write_magic() { 
-            stream.write((uint64_t)MAGIC);
-        }
-
         void write_thread_switch(PyObject * thread_handle) {
             stream.write(ThreadSwitch);
             write(thread_handle);

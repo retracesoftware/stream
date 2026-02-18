@@ -124,6 +124,21 @@ def get_path_info():
     }
 
 
+def list_pids(path):
+    """Scan a PID-framed trace and return the set of unique PIDs."""
+    pids = set()
+    with open(str(path), 'rb') as f:
+        while True:
+            header = f.read(6)
+            if len(header) < 6:
+                break
+            pid = int.from_bytes(header[:4], 'little')
+            length = int.from_bytes(header[4:6], 'little')
+            pids.add(pid)
+            f.seek(length, 1)
+    return pids
+
+
 class FileOutput:
     """Default output callback -- writes to a file with exclusive lock."""
 
@@ -148,14 +163,19 @@ def _append_write(path, data):
         f.write(data)
 
 
+def _fd_write(fd, data):
+    """Synchronous write to an open file descriptor."""
+    os.write(fd, bytes(data))
+
+
 class writer(_backend_mod.ObjectWriter):
 
     def __init__(self, path=None, thread=None, output=None,
                  flush_interval=0.1,
                  verbose=False,
-                 magic_markers=False,
                  disable_retrace=None,
-                 backpressure_timeout=None):
+                 backpressure_timeout=None,
+                 preamble=None):
 
         if output is None and path is not None:
             output = _backend_mod.AsyncFilePersister(str(path))
@@ -166,7 +186,7 @@ class writer(_backend_mod.ObjectWriter):
         super().__init__(output, thread=thread, serializer=self.serialize,
                         verbose=verbose,
                         normalize_path=normalize_path,
-                        magic_markers=magic_markers)
+                        preamble=preamble)
 
         self.backpressure_timeout = backpressure_timeout
 
@@ -195,30 +215,28 @@ class writer(_backend_mod.ObjectWriter):
         return self.type_serializer.get(type(obj), pickle.dumps)(obj)
 
     # -- Fork safety ----------------------------------------------------------
+    # PID-framed writes (each <= PIPE_BUF) let parent and child share the
+    # same fd after fork.  drain() stops the writer thread cleanly;
+    # resume() restarts it.  Both processes then write PID-prefixed frames
+    # and the reader demuxes by PID.
 
     def _before_fork(self):
         self.flush()
-        if hasattr(self._output, 'close'):
-            self._output.close()
-        self._output = None
-        dr = self._disable_retrace
-        if dr:
-            def safe_write(data):
-                with dr:
-                    _append_write(self.path, data)
-            self.output = safe_write
-        else:
-            self.output = lambda data: _append_write(self.path, data)
-        self.buffer_writes = False
+        if hasattr(self._output, 'drain'):
+            self._output.drain()
+        if not getattr(self._output, 'is_fifo', False) and hasattr(self._output, 'fd'):
+            import fcntl
+            fd = self._output.fd
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_APPEND)
 
     def _after_fork_parent(self):
-        self._output = _backend_mod.AsyncFilePersister(str(self.path), append=True)
-        self.output = self._output
-        self.buffer_writes = True
+        if hasattr(self._output, 'resume'):
+            self._output.resume()
 
     def _after_fork_child(self):
-        self.output = None
-        self._output = None
+        if hasattr(self._output, 'resume'):
+            self._output.resume()
 
 
 class StickyPred:
@@ -273,7 +291,7 @@ def per_thread(source, thread, timeout):
 
 class reader(_backend_mod.ObjectStreamReader):
 
-    def __init__(self, path, read_timeout, verbose, magic_markers=False):
+    def __init__(self, path, read_timeout, verbose):
         super().__init__(
             path=str(path),
             deserialize=self.deserialize,
@@ -282,7 +300,6 @@ class reader(_backend_mod.ObjectStreamReader):
             create_stack_delta=lambda to_drop, frames: None,
             read_timeout=read_timeout,
             verbose=verbose,
-            magic_markers=magic_markers,
             on_dropped=Dropped)
 
         self.type_deserializer = {}

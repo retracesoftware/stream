@@ -39,6 +39,5 @@ namespace retracesoftware_stream {
     struct ReaderWriterBase : public PyObject {
         PyObject * path;
         PyObject * normalize_path;
-        bool magic_markers;
     };
 }
