@@ -175,10 +175,11 @@ class writer(_backend_mod.ObjectWriter):
                  verbose=False,
                  disable_retrace=None,
                  backpressure_timeout=None,
-                 preamble=None):
+                 preamble=None,
+                 append=False):
 
         if output is None and path is not None:
-            output = _backend_mod.AsyncFilePersister(str(path))
+            output = _backend_mod.AsyncFilePersister(str(path), append=append)
 
         self._output = output
         self._disable_retrace = disable_retrace
