@@ -195,6 +195,12 @@ class writer(_backend_mod.ObjectWriter):
 
         self.type_serializer = {}
 
+        try:
+            from retracesoftware.utils import Stack
+            self.type_serializer[Stack] = tuple
+        except ImportError:
+            pass
+
         call_periodically(interval=flush_interval, func=self.flush)
 
         if path is not None and hasattr(os, 'register_at_fork'):

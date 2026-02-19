@@ -78,6 +78,21 @@ namespace retracesoftware_stream {
                     self->frame_buf[5] = (uint8_t)(chunk >> 8);
                     memcpy(self->frame_buf + FRAME_HEADER_SIZE, ptr, chunk);
 
+                    {
+                        uint32_t actual = (uint32_t)::getpid();
+                        uint32_t stamped = (uint32_t)self->frame_buf[0]
+                                         | ((uint32_t)self->frame_buf[1] << 8)
+                                         | ((uint32_t)self->frame_buf[2] << 16)
+                                         | ((uint32_t)self->frame_buf[3] << 24);
+                        if (stamped != actual) {
+                            fprintf(stderr,
+                                "AsyncFilePersister: PID mismatch! "
+                                "frame stamped %u but process is %u\n",
+                                stamped, actual);
+                            assert(stamped == actual);
+                        }
+                    }
+
                     size_t frame_size = FRAME_HEADER_SIZE + chunk;
                     while (true) {
                         ssize_t written = ::write(self->fd, self->frame_buf, frame_size);
