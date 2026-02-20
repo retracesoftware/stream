@@ -1,5 +1,7 @@
 #include "stream.h"
 #include "writer.h"
+#include "queueentry.h"
+#include "vendor/SPSCQueue.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -31,10 +33,9 @@ int pid() {
 namespace retracesoftware_stream {
 
     struct ObjectWriter;
+    struct AsyncFilePersister;
 
     static std::vector<ObjectWriter *> writers;
-
-    static void on_free(void * obj);
 
     struct StreamHandle : public PyObject {
         int index;
@@ -71,6 +72,29 @@ namespace retracesoftware_stream {
         }
     };
 
+    static PyObject* pickle_dumps_fn() {
+        static PyObject* dumps = nullptr;
+        if (!dumps) {
+            PyObject* mod = PyImport_ImportModule("pickle");
+            if (!mod) { PyErr_Clear(); return nullptr; }
+            dumps = PyObject_GetAttrString(mod, "dumps");
+            Py_DECREF(mod);
+            if (!dumps) { PyErr_Clear(); return nullptr; }
+        }
+        return dumps;
+    }
+
+    static bool is_native_type(PyObject* obj) {
+        if (obj == Py_None) return true;
+        PyTypeObject* tp = Py_TYPE(obj);
+        return tp == &PyLong_Type || tp == &PyUnicode_Type ||
+               tp == &PyFloat_Type || tp == &PyBytes_Type ||
+               tp == &PyBool_Type || tp == &PyTuple_Type ||
+               tp == &PyList_Type || tp == &PyDict_Type ||
+               tp == &StreamHandle_Type || tp == &PyMemoryView_Type ||
+               is_patched(tp->tp_free);
+    }
+
     static thread_local bool writing = false;
 
     class Writing {
@@ -94,7 +118,8 @@ namespace retracesoftware_stream {
 
     struct ObjectWriter : public ReaderWriterBase {
         
-        MessageStream stream;
+        rigtorp::SPSCQueue<uint64_t>* queue = nullptr;
+        PyObject* persister = nullptr;
 
         size_t messages_written = 0;
         int next_handle;
@@ -106,17 +131,23 @@ namespace retracesoftware_stream {
         retracesoftware::FastCall thread;
         vectorcallfunc vectorcall;
         PyObject *weakreflist;
+        PyObject * backpressure_timeout_value = nullptr;
 
-        // Output callback is None or null when disabled (no-op mode)
-        inline bool is_disabled() const { return stream.is_closed(); }
+        inline bool is_disabled() const { return queue == nullptr; }
+
+        void push(uint64_t entry) {
+            if (queue->try_push(entry)) return;
+            Py_BEGIN_ALLOW_THREADS
+            queue->push(entry);
+            Py_END_ALLOW_THREADS
+        }
+
+        void push_message_boundary() {
+            push(cmd_entry(CMD_MESSAGE_BOUNDARY));
+        }
 
         void debug_prefix(size_t bytes_written = 0) {
-            if (bytes_written == 0) {
-                bytes_written = stream.get_bytes_written();
-                printf("Retrace(%i) - ObjectWriter[%lu, %lu] -- ", ::pid(), messages_written, bytes_written);
-            } else {
-                printf("Retrace(%i) - ObjectWriter[%lu, %lu, %lu] -- ", ::pid(), messages_written, bytes_written, stream.get_bytes_written());
-            }
+            printf("Retrace(%i) - ObjectWriter[%lu] -- ", ::pid(), messages_written);
         }
 
         static PyObject * StreamHandle_vectorcall(StreamHandle * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
@@ -148,7 +179,19 @@ namespace retracesoftware_stream {
                 printf("%s(%s)\n", type, Py_TYPE(obj)->tp_name);
             }
 
-            stream.bind(obj, ext);
+            if (!is_patched(Py_TYPE(obj)->tp_free)) {
+                patch_free(Py_TYPE(obj));
+            }
+
+            if (ext) {
+                push(cmd_entry(CMD_EXT_BIND));
+                Py_INCREF(obj);  push(obj_entry(obj));
+                PyObject* type = (PyObject*)Py_TYPE(obj);
+                Py_INCREF(type); push(obj_entry(type));
+            } else {
+                push(cmd_entry(CMD_BIND));
+                Py_INCREF(obj);  push(obj_entry(obj));
+            }
             messages_written++;
         }
 
@@ -160,10 +203,9 @@ namespace retracesoftware_stream {
                 printf("DELETE(%i)\n", id);
             }
             int delta = next_handle - id;
+            assert(delta > 0);
 
-            assert (delta > 0);
-
-            stream.write_handle_delete(delta - 1);
+            push(cmd_entry(CMD_HANDLE_DELETE, delta - 1));
             messages_written++;
         }
 
@@ -171,12 +213,6 @@ namespace retracesoftware_stream {
             
             ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
 
-            // Guard against unsafe dealloc during interpreter shutdown:
-            //  - writer may be NULL if GC called tp_clear before tp_dealloc
-            //  - writer may be disabled if its output was cleared
-            //  - during finalization, write_delete calls back into Python
-            //    (PyObject_Str) which is unsafe as objects are
-            //    being torn down in unpredictable order
             if (writer && !writer->is_disabled() && !_Py_IsFinalizing()) {
                 writer->write_delete(self->index);
             }
@@ -200,8 +236,6 @@ namespace retracesoftware_stream {
         }
 
         PyObject * handle(PyObject * obj) {
-            // Return a handle even when disabled (for API compatibility)
-            // The handle's vectorcall will no-op
             if (is_disabled()) {
                 return stream_handle(next_handle++, nullptr);
             }
@@ -212,44 +246,58 @@ namespace retracesoftware_stream {
                 printf("NEW_HANDLE(%s)\n", PyUnicode_AsUTF8(str));
                 Py_DECREF(str);
             }
-            stream.write_new_handle(obj);
+
+            push(cmd_entry(CMD_NEW_HANDLE));
+            Py_INCREF(obj); push(obj_entry(obj));
             messages_written++;
             return stream_handle(next_handle++, verbose ? obj : nullptr);
         }
-
-        inline size_t get_bytes_written() const { return stream.get_bytes_written(); }
 
         void write_root(StreamHandle * obj) {
             if (verbose) {
                 debug_prefix();
                 PyObject * str = PyObject_Str(obj->object);
-                printf("%s\n", PyUnicode_AsUTF8(str));
+                printf("HANDLE_REF(%s)\n", PyUnicode_AsUTF8(str));
                 Py_DECREF(str);
             }
-            stream.write_stream_handle(obj);
+
+            push(cmd_entry(CMD_HANDLE_REF, obj->index));
             messages_written++;
-            stream.mark_message_boundary();
+            push_message_boundary();
         }
 
         void write_root(PyObject * obj) {
-            size_t before = stream.get_bytes_written();
-            stream.write(obj);
             if (verbose) {
-                debug_prefix(before);
+                debug_prefix();
                 PyObject * str = PyObject_Str(obj);
                 printf("%s\n", PyUnicode_AsUTF8(str));
                 Py_DECREF(str);
             }
+
+            if (is_native_type(obj)) {
+                Py_INCREF(obj);
+                push(obj_entry(obj));
+            } else {
+                PyObject* dumps = pickle_dumps_fn();
+                PyObject* pickled = dumps ? PyObject_CallOneArg(dumps, obj) : nullptr;
+                if (pickled) {
+                    push(cmd_entry(CMD_PICKLED));
+                    push(obj_entry(pickled));
+                } else {
+                    PyErr_Clear();
+                    Py_INCREF(obj);
+                    push(obj_entry(obj));
+                }
+            }
             messages_written++;
-            stream.mark_message_boundary();
+            push_message_boundary();
         }
 
         void object_freed(PyObject * obj) {
             if (is_disabled()) return;
 
-            if (stream.object_freed(obj)) {
-                messages_written++;
-            }
+            push(cmd_entry(CMD_BINDING_DELETE));
+            push(obj_entry(obj));
         }
 
         void write_all(StreamHandle * self, PyObject *const * args, size_t nargs) {
@@ -298,20 +346,18 @@ namespace retracesoftware_stream {
 
         static PyObject* py_vectorcall(ObjectWriter* self, PyObject*const * args, size_t nargsf, PyObject* kwnames) {
 
+            if (self->is_disabled()) Py_RETURN_NONE;
+
             if (kwnames) {
                 PyErr_SetString(PyExc_TypeError, "ObjectWriter does not accept keyword arguments");
                 return nullptr;
             }
          
             try {
-                uint64_t dropped = self->stream.get_dropped_messages();
-                if (dropped > 0) {
-                    self->stream.reset_dropped_messages();
-                    self->stream.write_dropped_marker(dropped);
-                    self->stream.mark_message_boundary();
-                }
                 self->write_all(args, PyVectorcall_NARGS(nargsf));
-                if (!self->buffer_writes) self->stream.flush();
+                if (!self->buffer_writes) {
+                    self->push(cmd_entry(CMD_FLUSH));
+                }
                 Py_RETURN_NONE;
             } catch (...) {
                 return nullptr;
@@ -319,8 +365,9 @@ namespace retracesoftware_stream {
         }
 
         static PyObject * py_flush(ObjectWriter * self, PyObject* unused) {
+            if (self->is_disabled()) Py_RETURN_NONE;
             try {
-                self->stream.flush();
+                self->push(cmd_entry(CMD_FLUSH));
                 Py_RETURN_NONE;
             } catch (...) {
                 return nullptr;
@@ -392,19 +439,20 @@ namespace retracesoftware_stream {
 
             self->normalize_path = Py_XNewRef(normalize_path);
             self->enable_when = nullptr;
+            self->queue = nullptr;
+            self->persister = nullptr;
 
-            if (output != Py_None) {
-                try {
-                    new (&self->stream) MessageStream(output, serializer);
-                } catch (...) {
-                    return -1;
-                }
+            if (output != Py_None && Py_TYPE(output) == &AsyncFilePersister_Type) {
+                void* q = AsyncFilePersister_setup(output, serializer, 65536);
+                if (!q) return -1;
+                self->queue = (rigtorp::SPSCQueue<uint64_t>*)q;
+                self->persister = Py_NewRef(output);
             }
 
             if (preamble && preamble != Py_None && !self->is_disabled()) {
                 try {
                     self->write_root(preamble);
-                    self->stream.flush();
+                    self->push(cmd_entry(CMD_FLUSH));
                 } catch (...) {
                     return -1;
                 }
@@ -440,29 +488,36 @@ namespace retracesoftware_stream {
                     printf("Retrace - ObjectWriter[%lu] -- THREAD_SWITCH(%s)\n", messages_written, PyUnicode_AsUTF8(str));
                     Py_DECREF(str);
                 }
-                stream.write_thread_switch(thread_handle);
+                push(cmd_entry(CMD_THREAD_SWITCH));
+                Py_INCREF(thread_handle);
+                push(obj_entry(thread_handle));
                 messages_written++;
             }
         }
 
         static int traverse(ObjectWriter* self, visitproc visit, void* arg) {
-            self->stream.traverse(visit, arg);
+            Py_VISIT(self->persister);
             Py_VISIT(self->thread.callable);
             Py_VISIT(self->path);
             Py_VISIT(self->normalize_path);
+            Py_VISIT(self->backpressure_timeout_value);
             return 0;
         }
 
         static int clear(ObjectWriter* self) {
-            self->stream.gc_clear();
+            Py_CLEAR(self->persister);
             Py_CLEAR(self->thread.callable);
             Py_CLEAR(self->path);
             Py_CLEAR(self->normalize_path);
+            Py_CLEAR(self->backpressure_timeout_value);
             return 0;
         }
 
         static void dealloc(ObjectWriter* self) {
-            self->stream.close();
+            if (self->queue) {
+                self->push(cmd_entry(CMD_SHUTDOWN));
+                self->queue = nullptr;
+            }
             
             if (self->weakreflist != NULL) {
                 PyObject_ClearWeakRefs((PyObject *)self);
@@ -477,10 +532,6 @@ namespace retracesoftware_stream {
             if (it != writers.end()) {
                 writers.erase(it);
             }
-        }
-
-        static PyObject * bytes_written_getter(ObjectWriter *self, void *closure) {
-            return PyLong_FromLong(self->stream.get_bytes_written());
         }
 
         static PyObject * path_getter(ObjectWriter *self, void *closure) {
@@ -499,8 +550,8 @@ namespace retracesoftware_stream {
         }
 
         static PyObject * output_getter(ObjectWriter *self, void *closure) {
-            PyObject* cb = self->stream.get_output_callback();
-            return Py_NewRef(cb ? cb : Py_None);
+            PyObject* p = self->persister;
+            return Py_NewRef(p ? p : Py_None);
         }
 
         static int output_setter(ObjectWriter *self, PyObject *value, void *closure) {
@@ -508,37 +559,44 @@ namespace retracesoftware_stream {
                 PyErr_SetString(PyExc_AttributeError, "deletion of 'output' is not allowed");
                 return -1;
             }
-            self->stream.set_output_callback(value == Py_None ? nullptr : value);
+            if (value == Py_None) {
+                self->queue = nullptr;
+                Py_CLEAR(self->persister);
+            }
             return 0;
         }
 
         static PyObject * backpressure_timeout_getter(ObjectWriter *self, void *closure) {
-            int64_t ns = self->stream.get_backpressure_timeout_ns();
-            if (ns < 0) Py_RETURN_NONE;
-            return PyFloat_FromDouble((double)ns / 1e9);
+            if (self->backpressure_timeout_value == nullptr) {
+                Py_RETURN_NONE;
+            }
+            Py_INCREF(self->backpressure_timeout_value);
+            return self->backpressure_timeout_value;
         }
 
         static int backpressure_timeout_setter(ObjectWriter *self, PyObject *value, void *closure) {
-            if (value == nullptr) {
-                PyErr_SetString(PyExc_AttributeError, "deletion of 'backpressure_timeout' is not allowed");
-                return -1;
-            }
-            if (value == Py_None) {
-                self->stream.set_backpressure_timeout_ns(-1);
+            if (value == Py_None || value == nullptr) {
+                Py_XDECREF(self->backpressure_timeout_value);
+                self->backpressure_timeout_value = nullptr;
                 return 0;
             }
-            double seconds = PyFloat_AsDouble(value);
-            if (seconds == -1.0 && PyErr_Occurred()) return -1;
-            if (seconds < 0) {
-                PyErr_SetString(PyExc_ValueError, "backpressure_timeout must be >= 0 or None");
+            double v = PyFloat_AsDouble(value);
+            if (v == -1.0 && PyErr_Occurred()) return -1;
+            if (v < 0) {
+                PyErr_SetString(PyExc_ValueError, "backpressure_timeout must be non-negative or None");
                 return -1;
             }
-            self->stream.set_backpressure_timeout_ns((int64_t)(seconds * 1e9));
+            Py_XDECREF(self->backpressure_timeout_value);
+            self->backpressure_timeout_value = PyFloat_FromDouble(v);
             return 0;
+        }
+
+        static PyObject * bytes_written_getter(ObjectWriter *self, void *closure) {
+            return PyLong_FromLong(0);
         }
     };
 
-    static void on_free(void * obj) {
+    void on_free(void * obj) {
         for (ObjectWriter * writer : writers) {
             writer->object_freed((PyObject *)obj);
         }
@@ -590,7 +648,7 @@ namespace retracesoftware_stream {
         {"flush", (PyCFunction)ObjectWriter::py_flush, METH_NOARGS, "Flush buffered data to the output callback"},
         {"bind", (PyCFunction)ObjectWriter::py_bind, METH_O, "TODO"},
         {"ext_bind", (PyCFunction)ObjectWriter::py_ext_bind, METH_O, "TODO"},
-        {NULL}  // Sentinel
+        {NULL}
     };
 
     static PyMemberDef members[] = {
@@ -599,7 +657,7 @@ namespace retracesoftware_stream {
         {"buffer_writes", T_BOOL, OFFSET_OF_MEMBER(ObjectWriter, buffer_writes), 0, "When false, flush after every write"},
         {"normalize_path", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, normalize_path), 0, "TODO"},
         {"enable_when", T_OBJECT, OFFSET_OF_MEMBER(ObjectWriter, enable_when), 0, "TODO"},
-        {NULL}  /* Sentinel */
+        {NULL}
     };
 
     static PyGetSetDef getset[] = {
@@ -607,7 +665,7 @@ namespace retracesoftware_stream {
         {"path", (getter)ObjectWriter::path_getter, (setter)ObjectWriter::path_setter, "TODO", NULL},
         {"output", (getter)ObjectWriter::output_getter, (setter)ObjectWriter::output_setter, "Output callback", NULL},
         {"backpressure_timeout", (getter)ObjectWriter::backpressure_timeout_getter, (setter)ObjectWriter::backpressure_timeout_setter, "Timeout in seconds before dropping messages under backpressure (None=wait forever, 0=drop immediately)", NULL},
-        {NULL}  // Sentinel
+        {NULL}
     };
 
     PyTypeObject ObjectWriter_Type = {

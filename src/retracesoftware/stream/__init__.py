@@ -6,6 +6,7 @@ Set RETRACE_DEBUG=1 to use the debug build with symbols and assertions.
 import os
 import pickle
 import inspect
+import struct
 import threading
 import time
 import weakref
@@ -140,16 +141,25 @@ def list_pids(path):
 
 
 class FileOutput:
-    """Default output callback -- writes to a file with exclusive lock."""
+    """Default output callback -- writes PID-framed data to a file with exclusive lock."""
+
+    _FRAME_HEADER = struct.Struct('<IH')
 
     def __init__(self, path, append=False):
         import fcntl
         mode = 'ab' if append else 'wb'
         self._file = open(str(path), mode)
         fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self._pid = os.getpid()
 
     def __call__(self, data):
-        self._file.write(data)
+        raw = bytes(data)
+        offset = 0
+        while offset < len(raw):
+            chunk = min(len(raw) - offset, 0xFFFF)
+            self._file.write(self._FRAME_HEADER.pack(self._pid, chunk))
+            self._file.write(raw[offset:offset + chunk])
+            offset += chunk
 
     def close(self):
         if self._file:
@@ -217,6 +227,8 @@ class writer(_backend_mod.ObjectWriter):
         self.flush()
         if hasattr(self, '_output') and self._output and hasattr(self._output, 'close'):
             self._output.close()
+        self.output = None
+        self._output = None
 
     def serialize(self, obj):
         return self.type_serializer.get(type(obj), pickle.dumps)(obj)
@@ -234,8 +246,9 @@ class writer(_backend_mod.ObjectWriter):
         if not getattr(self._output, 'is_fifo', False) and hasattr(self._output, 'fd'):
             import fcntl
             fd = self._output.fd
-            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_APPEND)
+            if fd >= 0:
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_APPEND)
 
     def _after_fork_parent(self):
         if hasattr(self._output, 'resume'):

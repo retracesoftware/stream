@@ -1,9 +1,10 @@
 #include "stream.h"
+#include "writer.h"
+#include "queueentry.h"
+#include "vendor/SPSCQueue.h"
 #include <structmember.h>
 #include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <deque>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <string>
@@ -22,27 +23,18 @@
 
 namespace retracesoftware_stream {
 
-    static constexpr size_t FRAME_HEADER_SIZE = 6;  // 4-byte PID + 2-byte payload length
+    static constexpr size_t FRAME_HEADER_SIZE = 6;
     static constexpr size_t MAX_FRAME_PAYLOAD = PIPE_BUF - FRAME_HEADER_SIZE;
+    static constexpr size_t DEFAULT_QUEUE_CAPACITY = 65536;
 
-    struct AsyncFilePersister : PyObject {
+    // ── SyncPidWriter ────────────────────────────────────────────
+    //
+    // Lightweight callable that writes PID-framed data synchronously
+    // to a file descriptor.  Used as the output_callback for the
+    // persister's internal PrimitiveStream.
+
+    struct SyncPidWriter : PyObject {
         int fd;
-        bool is_fifo;
-        std::thread writer_thread;
-        std::mutex mtx;
-        std::condition_variable cv;
-
-        struct WriteItem {
-            const void* data;
-            size_t size;
-            PyObject* memoryview;
-        };
-
-        std::deque<WriteItem> queue;
-        bool shutdown;
-        bool closed;
-        std::string stored_path;
-
         uint8_t frame_buf[PIPE_BUF];
 
         void stamp_pid() {
@@ -53,119 +45,268 @@ namespace retracesoftware_stream {
             frame_buf[3] = (uint8_t)(pid >> 24);
         }
 
-        static void writer_loop(AsyncFilePersister* self) {
-            while (true) {
-                WriteItem item;
-                {
-                    std::unique_lock<std::mutex> lock(self->mtx);
-                    self->cv.wait(lock, [self] {
-                        return !self->queue.empty() || self->shutdown;
-                    });
+        void write_framed(const uint8_t* data, size_t size) {
+            while (size > 0) {
+                uint16_t chunk = (uint16_t)std::min(size, MAX_FRAME_PAYLOAD);
+                frame_buf[4] = (uint8_t)(chunk);
+                frame_buf[5] = (uint8_t)(chunk >> 8);
+                memcpy(frame_buf + FRAME_HEADER_SIZE, data, chunk);
 
-                    if (self->shutdown && self->queue.empty()) break;
-
-                    item = self->queue.front();
-                    self->queue.pop_front();
-                }
-
-                const uint8_t* ptr = (const uint8_t*)item.data;
-                size_t remaining = item.size;
-
-                while (remaining > 0) {
-                    uint16_t chunk = (uint16_t)std::min(remaining, MAX_FRAME_PAYLOAD);
-
-                    self->frame_buf[4] = (uint8_t)(chunk);
-                    self->frame_buf[5] = (uint8_t)(chunk >> 8);
-                    memcpy(self->frame_buf + FRAME_HEADER_SIZE, ptr, chunk);
-
-                    {
-                        uint32_t actual = (uint32_t)::getpid();
-                        uint32_t stamped = (uint32_t)self->frame_buf[0]
-                                         | ((uint32_t)self->frame_buf[1] << 8)
-                                         | ((uint32_t)self->frame_buf[2] << 16)
-                                         | ((uint32_t)self->frame_buf[3] << 24);
-                        if (stamped != actual) {
-                            fprintf(stderr,
-                                "AsyncFilePersister: PID mismatch! "
-                                "frame stamped %u but process is %u\n",
-                                stamped, actual);
-                            assert(stamped == actual);
-                        }
-                    }
-
-                    size_t frame_size = FRAME_HEADER_SIZE + chunk;
-                    while (true) {
-                        ssize_t written = ::write(self->fd, self->frame_buf, frame_size);
-                        if (written < 0) {
-                            if (errno == EINTR) continue;
-                            perror("AsyncFilePersister: write failed");
-                            break;
-                        }
-                        if ((size_t)written != frame_size) {
-                            fprintf(stderr, "AsyncFilePersister: short write (%zd of %zu)\n",
-                                    written, frame_size);
-                        }
+                size_t frame_size = FRAME_HEADER_SIZE + chunk;
+                while (true) {
+                    ssize_t written = ::write(fd, frame_buf, frame_size);
+                    if (written < 0) {
+                        if (errno == EINTR) continue;
+                        perror("SyncPidWriter: write failed");
                         break;
                     }
-
-                    ptr += chunk;
-                    remaining -= chunk;
+                    break;
                 }
-
-                // Release the memoryview (needs GIL).
-                // This triggers bf_releasebuffer on the BufferSlot, clearing in_use.
-                PyGILState_STATE gstate = PyGILState_Ensure();
-                Py_DECREF(item.memoryview);
-                PyGILState_Release(gstate);
+                data += chunk;
+                size -= chunk;
             }
         }
 
-        static PyObject* call(AsyncFilePersister* self, PyObject* args, PyObject* kwargs) {
+        static PyObject* call(SyncPidWriter* self, PyObject* args, PyObject*) {
             PyObject* data;
             if (!PyArg_ParseTuple(args, "O", &data)) return nullptr;
 
             const void* ptr;
-            size_t size;
+            size_t sz;
 
             if (PyMemoryView_Check(data)) {
                 Py_buffer* view = PyMemoryView_GET_BUFFER(data);
                 ptr = view->buf;
-                size = (size_t)view->len;
+                sz = (size_t)view->len;
             } else if (PyBytes_Check(data)) {
                 ptr = PyBytes_AS_STRING(data);
-                size = (size_t)PyBytes_GET_SIZE(data);
+                sz = (size_t)PyBytes_GET_SIZE(data);
             } else {
                 PyErr_SetString(PyExc_TypeError, "expected memoryview or bytes");
                 return nullptr;
             }
 
-            Py_INCREF(data);
-
-            {
-                std::lock_guard<std::mutex> lock(self->mtx);
-                self->queue.push_back({ptr, size, data});
-            }
-            self->cv.notify_one();
-
+            self->write_framed((const uint8_t*)ptr, sz);
             Py_RETURN_NONE;
+        }
+
+        static void dealloc(SyncPidWriter* self) {
+            Py_TYPE(self)->tp_free((PyObject*)self);
+        }
+    };
+
+    PyTypeObject SyncPidWriter_Type = {
+        .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
+        .tp_name = MODULE "SyncPidWriter",
+        .tp_basicsize = sizeof(SyncPidWriter),
+        .tp_dealloc = (destructor)SyncPidWriter::dealloc,
+        .tp_call = (ternaryfunc)SyncPidWriter::call,
+        .tp_flags = Py_TPFLAGS_DEFAULT,
+    };
+
+    // ── AsyncFilePersister ───────────────────────────────────────
+    //
+    // Owns the SPSC queue consumer side, a MessageStream for
+    // serialization, and a background thread that processes entries.
+    // ObjectWriter pushes tagged uint64_t entries; the persister
+    // thread deserializes objects and writes PID-framed output.
+
+    struct AsyncFilePersister : PyObject {
+        int fd;
+        bool is_fifo;
+        std::thread writer_thread;
+        std::atomic<bool> shutdown_flag;
+        bool closed;
+        bool thread_started;
+        std::string stored_path;
+
+        rigtorp::SPSCQueue<uint64_t>* queue;
+        MessageStream* stream;
+        SyncPidWriter* sync_writer;
+
+        std::atomic<uint64_t> processed_cursor{0};
+
+        // Spin until the next entry appears, then pop and return it.
+        uint64_t consume_next() {
+            uint64_t* ep;
+            while (!(ep = queue->front())) std::this_thread::yield();
+            uint64_t v = *ep;
+            queue->pop();
+            return v;
+        }
+
+        PyObject* consume_ptr() {
+            return as_ptr(consume_next());
+        }
+
+        static void writer_loop(AsyncFilePersister* self) {
+            while (true) {
+                uint64_t* ep;
+                while (!(ep = self->queue->front())) {
+                    if (self->shutdown_flag.load(std::memory_order_acquire)) return;
+                    std::this_thread::yield();
+                }
+
+                PyGILState_STATE gstate = PyGILState_Ensure();
+
+                while ((ep = self->queue->front())) {
+                    uint64_t e = *ep;
+                    self->queue->pop();
+
+                    if (is_object(e)) {
+                        PyObject* obj = as_ptr(e);
+                        try {
+                            self->stream->write(obj);
+                        } catch (...) { PyErr_Clear(); }
+                        Py_DECREF(obj);
+                    } else {
+                        switch (cmd_of(e)) {
+                            case CMD_BIND: {
+                                PyObject* obj = self->consume_ptr();
+                                try { self->stream->bind(obj, false); } catch (...) { PyErr_Clear(); }
+                                Py_DECREF(obj);
+                                break;
+                            }
+                            case CMD_EXT_BIND: {
+                                PyObject* obj  = self->consume_ptr();
+                                PyObject* type = self->consume_ptr();
+                                try { self->stream->bind(obj, true); } catch (...) { PyErr_Clear(); }
+                                Py_DECREF(obj);
+                                Py_DECREF(type);
+                                break;
+                            }
+                            case CMD_NEW_HANDLE: {
+                                PyObject* obj = self->consume_ptr();
+                                try { self->stream->write_new_handle(obj); } catch (...) { PyErr_Clear(); }
+                                Py_DECREF(obj);
+                                break;
+                            }
+                            case CMD_THREAD_SWITCH: {
+                                PyObject* obj = self->consume_ptr();
+                                try { self->stream->write_thread_switch(obj); } catch (...) { PyErr_Clear(); }
+                                Py_DECREF(obj);
+                                break;
+                            }
+                            case CMD_BINDING_DELETE: {
+                                PyObject* obj = self->consume_ptr();
+                                try { self->stream->object_freed(obj); } catch (...) { PyErr_Clear(); }
+                                break;
+                            }
+                            case CMD_HANDLE_REF:
+                                try { self->stream->write_handle_ref_by_index(len_of(e)); } catch (...) { PyErr_Clear(); }
+                                break;
+                            case CMD_HANDLE_DELETE:
+                                try { self->stream->write_handle_delete(len_of(e)); } catch (...) { PyErr_Clear(); }
+                                break;
+                            case CMD_DROPPED:
+                                try { self->stream->write_dropped_marker(len_of(e)); } catch (...) { PyErr_Clear(); }
+                                break;
+                            case CMD_MESSAGE_BOUNDARY:
+                                try { self->stream->mark_message_boundary(); } catch (...) { PyErr_Clear(); }
+                                break;
+                            case CMD_FLUSH:
+                                try { self->stream->flush(); } catch (...) { PyErr_Clear(); }
+                                break;
+                            case CMD_PICKLED: {
+                                PyObject* bytes_obj = self->consume_ptr();
+                                try { self->stream->write_pre_pickled(bytes_obj); } catch (...) { PyErr_Clear(); }
+                                Py_DECREF(bytes_obj);
+                                break;
+                            }
+                            case CMD_SHUTDOWN:
+                                try { self->stream->flush(); } catch (...) { PyErr_Clear(); }
+                                self->processed_cursor.fetch_add(1, std::memory_order_release);
+                                PyGILState_Release(gstate);
+                                return;
+                        }
+                    }
+
+                    self->processed_cursor.fetch_add(1, std::memory_order_release);
+                }
+
+                PyGILState_Release(gstate);
+            }
+        }
+
+        rigtorp::SPSCQueue<uint64_t>* setup(PyObject* serializer, size_t capacity) {
+            if (queue) return queue;
+
+            queue = new rigtorp::SPSCQueue<uint64_t>(capacity);
+
+            sync_writer = (SyncPidWriter*)SyncPidWriter_Type.tp_alloc(&SyncPidWriter_Type, 0);
+            if (!sync_writer) {
+                delete queue;
+                queue = nullptr;
+                return nullptr;
+            }
+            sync_writer->fd = fd;
+            sync_writer->stamp_pid();
+
+            stream = new MessageStream((PyObject*)sync_writer, serializer);
+
+            shutdown_flag.store(false, std::memory_order_release);
+            writer_thread = std::thread(writer_loop, this);
+            thread_started = true;
+
+            return queue;
+        }
+
+        void drain_queue_entries() {
+            if (!queue) return;
+            while (auto* ep = queue->front()) {
+                uint64_t e = *ep;
+                if (is_object(e)) {
+                    Py_DECREF(as_ptr(e));
+                } else {
+                    uint32_t cmd = cmd_of(e);
+                    int follow = 0;
+                    bool do_decref = true;
+                    switch (cmd) {
+                        case CMD_BIND:
+                        case CMD_NEW_HANDLE:
+                        case CMD_THREAD_SWITCH:
+                        case CMD_PICKLED:        follow = 1; break;
+                        case CMD_EXT_BIND:       follow = 2; break;
+                        case CMD_BINDING_DELETE:  follow = 1; do_decref = false; break;
+                        default:                 break;
+                    }
+                    queue->pop();
+                    for (int i = 0; i < follow; i++) {
+                        while (!queue->front()) std::this_thread::yield();
+                        if (do_decref) Py_DECREF(as_ptr(*queue->front()));
+                        queue->pop();
+                    }
+                    continue;
+                }
+                queue->pop();
+            }
         }
 
         void do_close() {
             if (closed) return;
             closed = true;
 
-            {
-                std::lock_guard<std::mutex> lock(mtx);
-                shutdown = true;
-            }
-            cv.notify_one();
+            shutdown_flag.store(true, std::memory_order_release);
 
             if (writer_thread.joinable()) {
-                // Release the GIL so the writer thread can acquire it for
-                // Py_DECREF (which triggers bf_releasebuffer on BufferSlots).
                 Py_BEGIN_ALLOW_THREADS
                 writer_thread.join();
                 Py_END_ALLOW_THREADS
+            }
+            thread_started = false;
+
+            drain_queue_entries();
+
+            if (stream) {
+                delete stream;
+                stream = nullptr;
+            }
+            Py_XDECREF(sync_writer);
+            sync_writer = nullptr;
+
+            if (queue) {
+                delete queue;
+                queue = nullptr;
             }
 
             if (fd >= 0) {
@@ -180,29 +321,26 @@ namespace retracesoftware_stream {
         }
 
         void do_drain() {
-            if (closed) return;
+            if (closed || !thread_started) return;
 
-            {
-                std::lock_guard<std::mutex> lock(mtx);
-                shutdown = true;
-            }
-            cv.notify_one();
+            shutdown_flag.store(true, std::memory_order_release);
 
             if (writer_thread.joinable()) {
                 Py_BEGIN_ALLOW_THREADS
                 writer_thread.join();
                 Py_END_ALLOW_THREADS
             }
+            thread_started = false;
 
-            // Thread stopped, queue drained, but fd stays open.
-            // Reset state so resume() can restart.
-            shutdown = false;
+            shutdown_flag.store(false, std::memory_order_release);
         }
 
         void do_resume() {
-            if (closed || fd < 0) return;
-            stamp_pid();
+            if (closed || fd < 0 || !queue) return;
+            if (sync_writer) sync_writer->stamp_pid();
+            shutdown_flag.store(false, std::memory_order_release);
             writer_thread = std::thread(writer_loop, this);
+            thread_started = true;
         }
 
         static PyObject* py_drain(AsyncFilePersister* self, PyObject* unused) {
@@ -220,13 +358,14 @@ namespace retracesoftware_stream {
             if (self) {
                 self->fd = -1;
                 self->is_fifo = false;
-                self->shutdown = false;
+                self->shutdown_flag.store(false);
                 self->closed = true;
-                memset(self->frame_buf, 0, FRAME_HEADER_SIZE);
+                self->thread_started = false;
+                self->queue = nullptr;
+                self->stream = nullptr;
+                self->sync_writer = nullptr;
+                self->processed_cursor.store(0);
                 new (&self->writer_thread) std::thread();
-                new (&self->mtx) std::mutex();
-                new (&self->cv) std::condition_variable();
-                new (&self->queue) std::deque<WriteItem>();
                 new (&self->stored_path) std::string();
             }
             return (PyObject*)self;
@@ -267,10 +406,7 @@ namespace retracesoftware_stream {
             }
 
             self->stored_path = path;
-            self->shutdown = false;
             self->closed = false;
-            self->stamp_pid();
-            self->writer_thread = std::thread(writer_loop, self);
 
             return 0;
         }
@@ -278,11 +414,7 @@ namespace retracesoftware_stream {
         static void dealloc(AsyncFilePersister* self) {
             self->do_close();
 
-            // Destruct C++ members
             self->stored_path.~basic_string();
-            self->queue.~deque();
-            self->cv.~condition_variable();
-            self->mtx.~mutex();
             self->writer_thread.~thread();
 
             Py_TYPE(self)->tp_free((PyObject*)self);
@@ -320,15 +452,22 @@ namespace retracesoftware_stream {
         {NULL}
     };
 
+    void* AsyncFilePersister_setup(PyObject* persister, PyObject* serializer, size_t capacity) {
+        if (Py_TYPE(persister) != &AsyncFilePersister_Type) {
+            PyErr_SetString(PyExc_TypeError, "expected AsyncFilePersister");
+            return nullptr;
+        }
+        return ((AsyncFilePersister*)persister)->setup(serializer, capacity);
+    }
+
     PyTypeObject AsyncFilePersister_Type = {
         .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
         .tp_name = MODULE "AsyncFilePersister",
         .tp_basicsize = sizeof(AsyncFilePersister),
         .tp_itemsize = 0,
         .tp_dealloc = (destructor)AsyncFilePersister::dealloc,
-        .tp_call = (ternaryfunc)AsyncFilePersister::call,
         .tp_flags = Py_TPFLAGS_DEFAULT,
-        .tp_doc = "Async file persister -- writes to file on a background thread",
+        .tp_doc = "Async file persister -- serializes and writes to file on a background thread",
         .tp_methods = AsyncFilePersister_methods,
         .tp_getset = AsyncFilePersister_getset,
         .tp_init = (initproc)AsyncFilePersister::init,

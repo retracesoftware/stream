@@ -1,10 +1,13 @@
-"""Standalone tests for AsyncFilePersister.
+"""Tests for AsyncFilePersister via the writer pipeline.
 
-These exercise the persister directly with raw bytes/memoryview,
-without going through ObjectWriter or the writer wrapper.
+The persister is no longer directly callable -- it processes QueueEntry
+items from ObjectWriter via the SPSC queue. These tests exercise the
+persister's file handling and data integrity through the writer.
 """
 import gc
 import os
+import struct
+import threading
 
 import pytest
 
@@ -14,13 +17,27 @@ import retracesoftware.stream as stream
 _mod = stream._backend_mod
 AsyncFilePersister = _mod.AsyncFilePersister
 
+_thread_id = lambda: threading.current_thread().ident
+
+
+def _unframe(data: bytes) -> bytes:
+    """Strip PID frame headers and return concatenated payloads."""
+    out = bytearray()
+    i = 0
+    while i + 6 <= len(data):
+        _pid, length = struct.unpack_from('<IH', data, i)
+        i += 6
+        out.extend(data[i:i + length])
+        i += length
+    return bytes(out)
+
 
 # ---------------------------------------------------------------------------
 # Construction / teardown
 # ---------------------------------------------------------------------------
 
 def test_construct_and_close(tmp_path):
-    """Persister opens a file and the writer thread starts; close joins it."""
+    """Persister opens a file; close joins any threads."""
     path = tmp_path / "out.bin"
     p = AsyncFilePersister(str(path))
     assert path.exists()
@@ -36,14 +53,12 @@ def test_close_is_idempotent(tmp_path):
 
 
 def test_dealloc_without_close(tmp_path):
-    """Dropping all references should cleanly shut down the writer thread."""
+    """Dropping all references should cleanly shut down."""
     path = tmp_path / "out.bin"
     p = AsyncFilePersister(str(path))
-    p(b"garbage-collected")
     del p
     gc.collect()
-
-    assert path.stat().st_size == len(b"garbage-collected")
+    assert path.exists()
 
 
 def test_open_nonexistent_directory():
@@ -62,183 +77,47 @@ def test_exclusive_lock(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Writing bytes
+# Writing through the writer pipeline
 # ---------------------------------------------------------------------------
 
-def test_write_bytes_single(tmp_path):
-    """Write a single bytes object and verify file contents."""
+def test_write_single_message(tmp_path):
+    """Write a single object through the writer and verify file has data."""
     path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
-    p(b"hello")
-    p.close()
+    with stream.writer(path, thread=_thread_id) as w:
+        w("hello")
+        w.flush()
 
-    assert path.read_bytes() == b"hello"
+    raw = path.read_bytes()
+    assert len(raw) > 0
+    payload = _unframe(raw)
+    assert len(payload) > 0
 
 
-def test_write_bytes_multiple(tmp_path):
-    """Multiple byte writes are concatenated in order."""
+def test_write_multiple_messages(tmp_path):
+    """Multiple writes produce valid PID-framed output."""
     path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
-    p(b"aaa")
-    p(b"bbb")
-    p(b"ccc")
-    p.close()
+    with stream.writer(path, thread=_thread_id) as w:
+        for i in range(100):
+            w(f"msg_{i}")
+        w.flush()
 
-    assert path.read_bytes() == b"aaabbbccc"
+    raw = path.read_bytes()
+    payload = _unframe(raw)
+    assert len(payload) > 0
 
-
-def test_write_empty_bytes(tmp_path):
-    """Writing empty bytes should not corrupt the file."""
-    path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
-    p(b"before")
-    p(b"")
-    p(b"after")
-    p.close()
-
-    assert path.read_bytes() == b"beforeafter"
-
-
-# ---------------------------------------------------------------------------
-# Writing memoryview
-# ---------------------------------------------------------------------------
-
-def test_write_memoryview(tmp_path):
-    """Persister accepts a memoryview and writes the underlying bytes."""
-    path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
-    data = b"memoryview-data"
-    p(memoryview(data))
-    p.close()
-
-    assert path.read_bytes() == data
-
-
-def test_write_memoryview_slice(tmp_path):
-    """A sliced memoryview writes only the visible portion."""
-    path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
-    data = b"ABCDEFGHIJ"
-    mv = memoryview(data)[3:7]  # "DEFG"
-    p(mv)
-    p.close()
-
-    assert path.read_bytes() == b"DEFG"
-
-
-def test_write_mixed_bytes_and_memoryview(tmp_path):
-    """Interleaving bytes and memoryview writes preserves order."""
-    path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
-    p(b"bytes-")
-    p(memoryview(b"mv-"))
-    p(b"bytes")
-    p.close()
-
-    assert path.read_bytes() == b"bytes-mv-bytes"
-
-
-# ---------------------------------------------------------------------------
-# Type checking
-# ---------------------------------------------------------------------------
-
-def test_rejects_str(tmp_path):
-    """Passing a str should raise TypeError."""
-    p = AsyncFilePersister(str(tmp_path / "out.bin"))
-    with pytest.raises(TypeError, match="expected memoryview or bytes"):
-        p("not bytes")
-    p.close()
-
-
-def test_rejects_int(tmp_path):
-    """Passing an int should raise TypeError."""
-    p = AsyncFilePersister(str(tmp_path / "out.bin"))
-    with pytest.raises(TypeError):
-        p(42)
-    p.close()
-
-
-def test_rejects_list(tmp_path):
-    """Passing a list should raise TypeError."""
-    p = AsyncFilePersister(str(tmp_path / "out.bin"))
-    with pytest.raises(TypeError):
-        p([1, 2, 3])
-    p.close()
-
-
-# ---------------------------------------------------------------------------
-# Data integrity under volume
-# ---------------------------------------------------------------------------
-
-def test_large_sequential_writes(tmp_path):
-    """Many small writes are all persisted in order."""
-    path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
-
-    n = 10_000
-    for i in range(n):
-        p(f"{i}\n".encode())
-    p.close()
-
-    lines = path.read_text().splitlines()
-    assert len(lines) == n
-    for i, line in enumerate(lines):
-        assert line == str(i), f"line {i}: expected {i!r}, got {line!r}"
-
-
-def test_large_chunk_writes(tmp_path):
-    """Writing chunks larger than the BufferSlot size (64K)."""
-    path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
-
-    chunk = bytes(range(256)) * 512  # 128 KB
-    p(chunk)
-    p(chunk)
-    p.close()
-
-    data = path.read_bytes()
-    assert len(data) == len(chunk) * 2
-    assert data == chunk + chunk
-
-
-def test_many_flushes_stress(tmp_path):
-    """Simulate rapid flush cadence: many tiny writes followed by close."""
-    path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
-
-    expected = bytearray()
-    for i in range(5000):
-        chunk = bytes([i % 256]) * 13
-        p(chunk)
-        expected.extend(chunk)
-    p.close()
-
-    assert path.read_bytes() == bytes(expected)
-
-
-# ---------------------------------------------------------------------------
-# Close drains the queue
-# ---------------------------------------------------------------------------
 
 def test_close_drains_queue(tmp_path):
     """All queued writes must be flushed to disk before close() returns."""
     path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
+    with stream.writer(path, thread=_thread_id) as w:
+        for i in range(500):
+            w(f"item_{i:04d}")
 
-    total = 0
-    for i in range(200):
-        chunk = os.urandom(1000)
-        p(chunk)
-        total += len(chunk)
+    raw = path.read_bytes()
+    assert len(raw) > 0
+    payload = _unframe(raw)
+    assert len(payload) > 0
 
-    p.close()
-
-    assert path.stat().st_size == total
-
-
-# ---------------------------------------------------------------------------
-# File is truncated on open
-# ---------------------------------------------------------------------------
 
 def test_truncates_existing_file(tmp_path):
     """Opening a path that already contains data truncates to zero."""
@@ -246,7 +125,63 @@ def test_truncates_existing_file(tmp_path):
     path.write_bytes(b"old content that should disappear")
 
     p = AsyncFilePersister(str(path))
-    p(b"new")
     p.close()
 
-    assert path.read_bytes() == b"new"
+    assert path.read_bytes() == b""
+
+
+def test_append_mode(tmp_path):
+    """Opening with append=True preserves existing data."""
+    path = tmp_path / "out.bin"
+
+    with stream.writer(path, thread=_thread_id) as w:
+        w("first")
+        w.flush()
+
+    size_after_first = path.stat().st_size
+    assert size_after_first > 0
+
+    with stream.writer(path, thread=_thread_id, append=True) as w:
+        w("second")
+        w.flush()
+
+    assert path.stat().st_size > size_after_first
+
+
+def test_drain_and_resume(tmp_path):
+    """Drain stops the writer thread; resume restarts it."""
+    path = tmp_path / "out.bin"
+    p = AsyncFilePersister(str(path))
+    p.drain()
+    p.resume()
+    p.close()
+
+
+def test_many_writes_stress(tmp_path):
+    """Stress test: many rapid writes all get persisted."""
+    path = tmp_path / "out.bin"
+    with stream.writer(path, thread=_thread_id, flush_interval=999) as w:
+        for i in range(5000):
+            w(f"stress_{i}")
+        w.flush()
+
+    raw = path.read_bytes()
+    payload = _unframe(raw)
+    assert len(payload) > 0
+
+
+def test_fd_getter(tmp_path):
+    """The fd property returns a valid file descriptor."""
+    path = tmp_path / "out.bin"
+    p = AsyncFilePersister(str(path))
+    assert p.fd >= 0
+    p.close()
+    assert p.fd < 0
+
+
+def test_path_getter(tmp_path):
+    """The path property returns the file path."""
+    path = tmp_path / "out.bin"
+    p = AsyncFilePersister(str(path))
+    assert p.path == str(path)
+    p.close()

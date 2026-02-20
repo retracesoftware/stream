@@ -531,7 +531,7 @@ namespace retracesoftware_stream {
 
     static map<PyTypeObject *, freefunc> freefuncs;
 
-    static void on_free(void * obj);
+    void on_free(void * obj);
 
     static void generic_free(void * obj) {
         auto it = freefuncs.find(Py_TYPE(obj));
@@ -720,8 +720,16 @@ namespace retracesoftware_stream {
             interned_index.clear();
         }
 
+        bool is_bound(PyObject * obj) const {
+            return bindings.contains(obj);
+        }
+
         void write_handle_delete(int delta) {
             stream.write_unsigned_number(SizedTypes::DELETE, delta);
+        }
+
+        void write_handle_ref_by_index(int index) {
+            stream.write_handle_ref(index);
         }
 
         void write_new_handle(PyObject * obj) {
@@ -782,7 +790,7 @@ namespace retracesoftware_stream {
         void bind(PyObject * obj, bool ext) {
 
             if (bindings.contains(obj)) {
-                PyErr_Format(PyExc_RuntimeError, "object: %S already bound", obj);
+                PyErr_Format(PyExc_RuntimeError, "<%s object at %p> already bound", Py_TYPE(obj)->tp_name, (void *)obj);
                 throw nullptr;
             }
 
@@ -793,7 +801,7 @@ namespace retracesoftware_stream {
 
             if (ext) {
                 if (!bindings.contains((PyObject *)Py_TYPE(obj))) {
-                    PyErr_Format(PyExc_RuntimeError, "to externally bind object: %S, object type: %S must have been bound", obj, Py_TYPE(obj));
+                    PyErr_Format(PyExc_RuntimeError, "to externally bind <%s object at %p>, object type %s must have been bound first", Py_TYPE(obj)->tp_name, (void *)obj, Py_TYPE(obj)->tp_name);
                     throw nullptr;
                 }
                 stream.write(FixedSizeTypes::EXT_BIND);
@@ -845,6 +853,11 @@ namespace retracesoftware_stream {
         void write_dropped_marker(uint64_t count) {
             stream.write(Dropped);
             stream.write_sized_int(count);
+        }
+
+        void write_pre_pickled(PyObject* bytes_obj) {
+            assert(PyBytes_Check(bytes_obj));
+            stream.write_pickled(bytes_obj);
         }
     };
 }

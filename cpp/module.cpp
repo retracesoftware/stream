@@ -5,6 +5,7 @@
 static PyTypeObject * hidden_types[] = {
     &retracesoftware_stream::BufferSlot_Type,
     &retracesoftware_stream::StreamHandle_Type,
+    &retracesoftware_stream::SyncPidWriter_Type,
     nullptr
 };
 

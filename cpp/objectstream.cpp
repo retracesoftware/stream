@@ -93,7 +93,7 @@ namespace retracesoftware_stream {
                 "on_dropped",
                 nullptr};
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOKp|O", (char **)kwlist, 
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOip|O", (char **)kwlist, 
                 &PyUnicode_Type, &path, 
                 &create_pickled,
                 &bind_singleton,
@@ -107,6 +107,7 @@ namespace retracesoftware_stream {
 
             new (&self->handles) std::vector<PyObject *>();
             new (&self->filenames) std::vector<PyObject *>();
+            new (&self->interned_strings) std::vector<PyObject *>();
             new (&self->bindings) map<int, PyObject *>();
             new (&self->skipped_frames) std::unordered_map<uint32_t, std::vector<uint8_t>>();
             self->replay_buf = nullptr;
@@ -861,7 +862,7 @@ namespace retracesoftware_stream {
         // {"stack_stop_at", T_ULONGLONG, OFFSET_OF_MEMBER(ObjectReader, stack_stop_at), 0, "TODO"},
         // {"pending_reads", T_OBJECT, OFFSET_OF_MEMBER(ObjectReader, pending_reads), READONLY, "TODO"},
         // {"path", T_OBJECT, OFFSET_OF_MEMBER(Writer, path), READONLY, "TODO"},
-        {"read_timeout", T_ULONG, OFFSET_OF_MEMBER(ObjectStream, read_timeout), 0, "TODO"},
+        {"read_timeout", T_INT, OFFSET_OF_MEMBER(ObjectStream, read_timeout), 0, "TODO"},
         {"bytes_read", T_ULONG, OFFSET_OF_MEMBER(ObjectStream, bytes_read), READONLY, "TODO"},
         {"messages_read", T_ULONG, OFFSET_OF_MEMBER(ObjectStream, messages_read), READONLY, "TODO"},
         {"pending_bind", T_BOOL, OFFSET_OF_MEMBER(ObjectStream, pending_bind), READONLY, "TODO"},
