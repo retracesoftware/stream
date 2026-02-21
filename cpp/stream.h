@@ -88,11 +88,19 @@ namespace retracesoftware_stream {
     extern PyTypeObject StreamHandle_Type;
     extern PyTypeObject ObjectStream_Type;
     extern PyTypeObject AsyncFilePersister_Type;
-    extern PyTypeObject SyncPidWriter_Type;
+
+    struct SetupResult {
+        void* forward_queue;    // SPSCQueue<uint64_t>*
+        void* return_queue;     // SPSCQueue<PyObject*>*
+    };
 
     // Defined in persister.cpp — called by ObjectWriter during init.
-    // Returns a raw pointer to the SPSCQueue<uint64_t>, or nullptr on error.
-    void* AsyncFilePersister_setup(PyObject* persister, PyObject* serializer, size_t capacity);
+    // inflight_ptr points to the ObjectWriter's inflight_bytes counter
+    // (updated by the drain thread under the GIL).
+    SetupResult AsyncFilePersister_setup(PyObject* persister, PyObject* serializer,
+                                         size_t queue_capacity,
+                                         size_t return_queue_capacity,
+                                         int64_t* inflight_ptr);
 
     // extern PyTypeObject WeakRefCallback_Type;
     // extern PyTypeObject ObjectReader_Type;

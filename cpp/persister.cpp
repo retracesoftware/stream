@@ -14,95 +14,12 @@
     #include <fcntl.h>
     #include <sys/file.h>
     #include <sys/stat.h>
+    #include <sys/socket.h>
+    #include <sys/un.h>
     #include <limits.h>
 #endif
 
-#ifndef PIPE_BUF
-#define PIPE_BUF 512
-#endif
-
 namespace retracesoftware_stream {
-
-    static constexpr size_t FRAME_HEADER_SIZE = 6;
-    static constexpr size_t MAX_FRAME_PAYLOAD = PIPE_BUF - FRAME_HEADER_SIZE;
-    static constexpr size_t DEFAULT_QUEUE_CAPACITY = 65536;
-
-    // ── SyncPidWriter ────────────────────────────────────────────
-    //
-    // Lightweight callable that writes PID-framed data synchronously
-    // to a file descriptor.  Used as the output_callback for the
-    // persister's internal PrimitiveStream.
-
-    struct SyncPidWriter : PyObject {
-        int fd;
-        uint8_t frame_buf[PIPE_BUF];
-
-        void stamp_pid() {
-            uint32_t pid = (uint32_t)::getpid();
-            frame_buf[0] = (uint8_t)(pid);
-            frame_buf[1] = (uint8_t)(pid >> 8);
-            frame_buf[2] = (uint8_t)(pid >> 16);
-            frame_buf[3] = (uint8_t)(pid >> 24);
-        }
-
-        void write_framed(const uint8_t* data, size_t size) {
-            while (size > 0) {
-                uint16_t chunk = (uint16_t)std::min(size, MAX_FRAME_PAYLOAD);
-                frame_buf[4] = (uint8_t)(chunk);
-                frame_buf[5] = (uint8_t)(chunk >> 8);
-                memcpy(frame_buf + FRAME_HEADER_SIZE, data, chunk);
-
-                size_t frame_size = FRAME_HEADER_SIZE + chunk;
-                while (true) {
-                    ssize_t written = ::write(fd, frame_buf, frame_size);
-                    if (written < 0) {
-                        if (errno == EINTR) continue;
-                        perror("SyncPidWriter: write failed");
-                        break;
-                    }
-                    break;
-                }
-                data += chunk;
-                size -= chunk;
-            }
-        }
-
-        static PyObject* call(SyncPidWriter* self, PyObject* args, PyObject*) {
-            PyObject* data;
-            if (!PyArg_ParseTuple(args, "O", &data)) return nullptr;
-
-            const void* ptr;
-            size_t sz;
-
-            if (PyMemoryView_Check(data)) {
-                Py_buffer* view = PyMemoryView_GET_BUFFER(data);
-                ptr = view->buf;
-                sz = (size_t)view->len;
-            } else if (PyBytes_Check(data)) {
-                ptr = PyBytes_AS_STRING(data);
-                sz = (size_t)PyBytes_GET_SIZE(data);
-            } else {
-                PyErr_SetString(PyExc_TypeError, "expected memoryview or bytes");
-                return nullptr;
-            }
-
-            self->write_framed((const uint8_t*)ptr, sz);
-            Py_RETURN_NONE;
-        }
-
-        static void dealloc(SyncPidWriter* self) {
-            Py_TYPE(self)->tp_free((PyObject*)self);
-        }
-    };
-
-    PyTypeObject SyncPidWriter_Type = {
-        .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
-        .tp_name = MODULE "SyncPidWriter",
-        .tp_basicsize = sizeof(SyncPidWriter),
-        .tp_dealloc = (destructor)SyncPidWriter::dealloc,
-        .tp_call = (ternaryfunc)SyncPidWriter::call,
-        .tp_flags = Py_TPFLAGS_DEFAULT,
-    };
 
     // ── AsyncFilePersister ───────────────────────────────────────
     //
@@ -114,15 +31,21 @@ namespace retracesoftware_stream {
     struct AsyncFilePersister : PyObject {
         int fd;
         bool is_fifo;
+        bool is_socket;
+        size_t output_buf_size;
         std::thread writer_thread;
+        std::thread return_thread;
         std::atomic<bool> shutdown_flag;
+        std::atomic<bool> return_shutdown;
         bool closed;
         bool thread_started;
         std::string stored_path;
 
         rigtorp::SPSCQueue<uint64_t>* queue;
+        rigtorp::SPSCQueue<PyObject*>* return_queue;
+        PidFramedOutput* output;
         MessageStream* stream;
-        SyncPidWriter* sync_writer;
+        int64_t* inflight_ptr;
 
         std::atomic<uint64_t> processed_cursor{0};
 
@@ -137,6 +60,52 @@ namespace retracesoftware_stream {
 
         PyObject* consume_ptr() {
             return as_ptr(consume_next());
+        }
+
+        void return_obj(PyObject* obj) {
+            if (!return_queue->try_push(obj)) {
+                Py_DECREF(obj);
+            }
+        }
+
+        void consume_and_write_value() {
+            uint64_t e = consume_next();
+            if (is_object(e)) {
+                PyObject* obj = as_ptr(e);
+                try { stream->write(obj); } catch (...) { PyErr_Clear(); }
+                return_obj(obj);
+                return;
+            }
+            switch (cmd_of(e)) {
+                case CMD_LIST: {
+                    uint32_t n = len_of(e);
+                    try { stream->write_list_header(n); } catch (...) { PyErr_Clear(); }
+                    for (uint32_t i = 0; i < n; i++) consume_and_write_value();
+                    break;
+                }
+                case CMD_TUPLE: {
+                    uint32_t n = len_of(e);
+                    try { stream->write_tuple_header(n); } catch (...) { PyErr_Clear(); }
+                    for (uint32_t i = 0; i < n; i++) consume_and_write_value();
+                    break;
+                }
+                case CMD_DICT: {
+                    uint32_t n = len_of(e);
+                    try { stream->write_dict_header(n); } catch (...) { PyErr_Clear(); }
+                    for (uint32_t i = 0; i < n; i++) {
+                        consume_and_write_value();
+                        consume_and_write_value();
+                    }
+                    break;
+                }
+                case CMD_PICKLED: {
+                    PyObject* bytes_obj = consume_ptr();
+                    try { stream->write_pre_pickled(bytes_obj); } catch (...) { PyErr_Clear(); }
+                    return_obj(bytes_obj);
+                    break;
+                }
+                default: break;
+            }
         }
 
         static void writer_loop(AsyncFilePersister* self) {
@@ -158,33 +127,33 @@ namespace retracesoftware_stream {
                         try {
                             self->stream->write(obj);
                         } catch (...) { PyErr_Clear(); }
-                        Py_DECREF(obj);
+                        self->return_obj(obj);
                     } else {
                         switch (cmd_of(e)) {
                             case CMD_BIND: {
                                 PyObject* obj = self->consume_ptr();
                                 try { self->stream->bind(obj, false); } catch (...) { PyErr_Clear(); }
-                                Py_DECREF(obj);
+                                self->return_obj(obj);
                                 break;
                             }
                             case CMD_EXT_BIND: {
                                 PyObject* obj  = self->consume_ptr();
                                 PyObject* type = self->consume_ptr();
                                 try { self->stream->bind(obj, true); } catch (...) { PyErr_Clear(); }
-                                Py_DECREF(obj);
-                                Py_DECREF(type);
+                                self->return_obj(obj);
+                                self->return_obj(type);
                                 break;
                             }
                             case CMD_NEW_HANDLE: {
                                 PyObject* obj = self->consume_ptr();
                                 try { self->stream->write_new_handle(obj); } catch (...) { PyErr_Clear(); }
-                                Py_DECREF(obj);
+                                self->return_obj(obj);
                                 break;
                             }
                             case CMD_THREAD_SWITCH: {
                                 PyObject* obj = self->consume_ptr();
                                 try { self->stream->write_thread_switch(obj); } catch (...) { PyErr_Clear(); }
-                                Py_DECREF(obj);
+                                self->return_obj(obj);
                                 break;
                             }
                             case CMD_BINDING_DELETE: {
@@ -198,19 +167,34 @@ namespace retracesoftware_stream {
                             case CMD_HANDLE_DELETE:
                                 try { self->stream->write_handle_delete(len_of(e)); } catch (...) { PyErr_Clear(); }
                                 break;
-                            case CMD_DROPPED:
-                                try { self->stream->write_dropped_marker(len_of(e)); } catch (...) { PyErr_Clear(); }
-                                break;
-                            case CMD_MESSAGE_BOUNDARY:
-                                try { self->stream->mark_message_boundary(); } catch (...) { PyErr_Clear(); }
-                                break;
                             case CMD_FLUSH:
                                 try { self->stream->flush(); } catch (...) { PyErr_Clear(); }
                                 break;
                             case CMD_PICKLED: {
                                 PyObject* bytes_obj = self->consume_ptr();
                                 try { self->stream->write_pre_pickled(bytes_obj); } catch (...) { PyErr_Clear(); }
-                                Py_DECREF(bytes_obj);
+                                self->return_obj(bytes_obj);
+                                break;
+                            }
+                            case CMD_LIST: {
+                                uint32_t n = len_of(e);
+                                try { self->stream->write_list_header(n); } catch (...) { PyErr_Clear(); }
+                                for (uint32_t i = 0; i < n; i++) self->consume_and_write_value();
+                                break;
+                            }
+                            case CMD_TUPLE: {
+                                uint32_t n = len_of(e);
+                                try { self->stream->write_tuple_header(n); } catch (...) { PyErr_Clear(); }
+                                for (uint32_t i = 0; i < n; i++) self->consume_and_write_value();
+                                break;
+                            }
+                            case CMD_DICT: {
+                                uint32_t n = len_of(e);
+                                try { self->stream->write_dict_header(n); } catch (...) { PyErr_Clear(); }
+                                for (uint32_t i = 0; i < n; i++) {
+                                    self->consume_and_write_value();
+                                    self->consume_and_write_value();
+                                }
                                 break;
                             }
                             case CMD_SHUTDOWN:
@@ -228,27 +212,85 @@ namespace retracesoftware_stream {
             }
         }
 
-        rigtorp::SPSCQueue<uint64_t>* setup(PyObject* serializer, size_t capacity) {
-            if (queue) return queue;
+        static void drain_loop(AsyncFilePersister* self) {
+            while (true) {
+                PyObject** ep;
+                while (!(ep = self->return_queue->front())) {
+                    if (self->return_shutdown.load(std::memory_order_acquire))
+                        return;
+                    std::this_thread::yield();
+                }
 
-            queue = new rigtorp::SPSCQueue<uint64_t>(capacity);
+                PyGILState_STATE gstate = PyGILState_Ensure();
+                auto batch_start = std::chrono::steady_clock::now();
+                int deallocs = 0;
 
-            sync_writer = (SyncPidWriter*)SyncPidWriter_Type.tp_alloc(&SyncPidWriter_Type, 0);
-            if (!sync_writer) {
-                delete queue;
-                queue = nullptr;
-                return nullptr;
+                while ((ep = self->return_queue->front())) {
+                    PyObject* obj = *ep;
+                    self->return_queue->pop();
+                    if (self->inflight_ptr)
+                        *(self->inflight_ptr) -= estimate_size(obj);
+                    if (Py_REFCNT(obj) == 1) deallocs++;
+                    Py_DECREF(obj);
+                    if (deallocs >= 32) {
+                        deallocs = 0;
+                        auto now = std::chrono::steady_clock::now();
+                        if (now - batch_start > std::chrono::microseconds(100)) {
+                            PyGILState_Release(gstate);
+                            std::this_thread::yield();
+                            gstate = PyGILState_Ensure();
+                            batch_start = std::chrono::steady_clock::now();
+                        }
+                    }
+                }
+
+                PyGILState_Release(gstate);
             }
-            sync_writer->fd = fd;
-            sync_writer->stamp_pid();
+        }
 
-            stream = new MessageStream((PyObject*)sync_writer, serializer);
+        SetupResult setup(PyObject* serializer, size_t queue_capacity,
+                         size_t return_queue_capacity, int64_t* inflight) {
+            if (queue) return {queue, return_queue};
+
+            queue = new rigtorp::SPSCQueue<uint64_t>(queue_capacity);
+            return_queue = new rigtorp::SPSCQueue<PyObject*>(return_queue_capacity);
+            inflight_ptr = inflight;
+
+            output = new PidFramedOutput(fd, output_buf_size);
+            stream = new MessageStream(PidFramedOutput::write, output, serializer);
 
             shutdown_flag.store(false, std::memory_order_release);
+            return_shutdown.store(false, std::memory_order_release);
             writer_thread = std::thread(writer_loop, this);
+            return_thread = std::thread(drain_loop, this);
             thread_started = true;
 
-            return queue;
+            return {queue, return_queue};
+        }
+
+        void drain_value() {
+            while (!queue->front()) std::this_thread::yield();
+            uint64_t e = *queue->front();
+            queue->pop();
+            if (is_object(e)) {
+                Py_DECREF(as_ptr(e));
+                return;
+            }
+            switch (cmd_of(e)) {
+                case CMD_LIST:
+                case CMD_TUPLE:
+                    for (uint32_t i = 0, n = len_of(e); i < n; i++) drain_value();
+                    break;
+                case CMD_DICT:
+                    for (uint32_t i = 0, n = len_of(e) * 2; i < n; i++) drain_value();
+                    break;
+                case CMD_PICKLED:
+                    while (!queue->front()) std::this_thread::yield();
+                    Py_DECREF(as_ptr(*queue->front()));
+                    queue->pop();
+                    break;
+                default: break;
+            }
         }
 
         void drain_queue_entries() {
@@ -257,28 +299,55 @@ namespace retracesoftware_stream {
                 uint64_t e = *ep;
                 if (is_object(e)) {
                     Py_DECREF(as_ptr(e));
-                } else {
-                    uint32_t cmd = cmd_of(e);
-                    int follow = 0;
-                    bool do_decref = true;
-                    switch (cmd) {
-                        case CMD_BIND:
-                        case CMD_NEW_HANDLE:
-                        case CMD_THREAD_SWITCH:
-                        case CMD_PICKLED:        follow = 1; break;
-                        case CMD_EXT_BIND:       follow = 2; break;
-                        case CMD_BINDING_DELETE:  follow = 1; do_decref = false; break;
-                        default:                 break;
-                    }
                     queue->pop();
-                    for (int i = 0; i < follow; i++) {
-                        while (!queue->front()) std::this_thread::yield();
-                        if (do_decref) Py_DECREF(as_ptr(*queue->front()));
-                        queue->pop();
-                    }
                     continue;
                 }
+                uint32_t cmd = cmd_of(e);
                 queue->pop();
+                switch (cmd) {
+                    case CMD_BIND:
+                    case CMD_NEW_HANDLE:
+                    case CMD_THREAD_SWITCH:
+                        while (!queue->front()) std::this_thread::yield();
+                        Py_DECREF(as_ptr(*queue->front()));
+                        queue->pop();
+                        break;
+                    case CMD_EXT_BIND:
+                        for (int i = 0; i < 2; i++) {
+                            while (!queue->front()) std::this_thread::yield();
+                            Py_DECREF(as_ptr(*queue->front()));
+                            queue->pop();
+                        }
+                        break;
+                    case CMD_BINDING_DELETE:
+                        while (!queue->front()) std::this_thread::yield();
+                        queue->pop();
+                        break;
+                    case CMD_PICKLED:
+                        while (!queue->front()) std::this_thread::yield();
+                        Py_DECREF(as_ptr(*queue->front()));
+                        queue->pop();
+                        break;
+                    case CMD_LIST:
+                    case CMD_TUPLE:
+                        for (uint32_t i = 0, n = len_of(e); i < n; i++) drain_value();
+                        break;
+                    case CMD_DICT:
+                        for (uint32_t i = 0, n = len_of(e) * 2; i < n; i++) drain_value();
+                        break;
+                    default: break;
+                }
+            }
+        }
+
+        void drain_return_queue() {
+            if (!return_queue) return;
+            while (auto* ep = return_queue->front()) {
+                PyObject* obj = *ep;
+                return_queue->pop();
+                if (inflight_ptr)
+                    *inflight_ptr -= estimate_size(obj);
+                Py_DECREF(obj);
             }
         }
 
@@ -293,20 +362,36 @@ namespace retracesoftware_stream {
                 writer_thread.join();
                 Py_END_ALLOW_THREADS
             }
+
+            return_shutdown.store(true, std::memory_order_release);
+
+            if (return_thread.joinable()) {
+                Py_BEGIN_ALLOW_THREADS
+                return_thread.join();
+                Py_END_ALLOW_THREADS
+            }
+
             thread_started = false;
 
+            drain_return_queue();
             drain_queue_entries();
 
             if (stream) {
                 delete stream;
                 stream = nullptr;
             }
-            Py_XDECREF(sync_writer);
-            sync_writer = nullptr;
+            if (output) {
+                delete output;
+                output = nullptr;
+            }
 
             if (queue) {
                 delete queue;
                 queue = nullptr;
+            }
+            if (return_queue) {
+                delete return_queue;
+                return_queue = nullptr;
             }
 
             if (fd >= 0) {
@@ -330,16 +415,29 @@ namespace retracesoftware_stream {
                 writer_thread.join();
                 Py_END_ALLOW_THREADS
             }
+
+            return_shutdown.store(true, std::memory_order_release);
+
+            if (return_thread.joinable()) {
+                Py_BEGIN_ALLOW_THREADS
+                return_thread.join();
+                Py_END_ALLOW_THREADS
+            }
+
+            drain_return_queue();
             thread_started = false;
 
             shutdown_flag.store(false, std::memory_order_release);
+            return_shutdown.store(false, std::memory_order_release);
         }
 
         void do_resume() {
             if (closed || fd < 0 || !queue) return;
-            if (sync_writer) sync_writer->stamp_pid();
+            if (output) output->stamp_pid();
             shutdown_flag.store(false, std::memory_order_release);
+            return_shutdown.store(false, std::memory_order_release);
             writer_thread = std::thread(writer_loop, this);
+            return_thread = std::thread(drain_loop, this);
             thread_started = true;
         }
 
@@ -358,17 +456,32 @@ namespace retracesoftware_stream {
             if (self) {
                 self->fd = -1;
                 self->is_fifo = false;
+                self->is_socket = false;
+                self->output_buf_size = PIPE_BUF;
                 self->shutdown_flag.store(false);
+                self->return_shutdown.store(false);
                 self->closed = true;
                 self->thread_started = false;
                 self->queue = nullptr;
+                self->return_queue = nullptr;
+                self->output = nullptr;
                 self->stream = nullptr;
-                self->sync_writer = nullptr;
+                self->inflight_ptr = nullptr;
                 self->processed_cursor.store(0);
                 new (&self->writer_thread) std::thread();
+                new (&self->return_thread) std::thread();
                 new (&self->stored_path) std::string();
             }
             return (PyObject*)self;
+        }
+
+        static size_t query_socket_sndbuf(int fd) {
+            int sndbuf = 0;
+            socklen_t len = sizeof(sndbuf);
+            if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &len) == 0 && sndbuf > 0) {
+                return (size_t)sndbuf;
+            }
+            return 65536;
         }
 
         static int init(AsyncFilePersister* self, PyObject* args, PyObject* kwds) {
@@ -381,27 +494,62 @@ namespace retracesoftware_stream {
             }
 
             struct stat st;
-            bool path_is_fifo = (::stat(path, &st) == 0 && S_ISFIFO(st.st_mode));
+            bool path_is_fifo = false;
+            bool path_is_socket = false;
 
-            int flags = O_WRONLY;
-            if (!path_is_fifo) flags |= O_CREAT | (append ? O_APPEND : O_TRUNC);
-
-            self->fd = ::open(path, flags, 0644);
-            if (self->fd < 0) {
-                PyErr_Format(PyExc_IOError,
-                    "Could not open file: %s for writing: %s", path, strerror(errno));
-                return -1;
+            if (::stat(path, &st) == 0) {
+                path_is_fifo = S_ISFIFO(st.st_mode);
+                path_is_socket = S_ISSOCK(st.st_mode);
             }
 
-            self->is_fifo = path_is_fifo;
-
-            if (!path_is_fifo) {
-                if (flock(self->fd, LOCK_EX | LOCK_NB) == -1) {
+            if (path_is_socket) {
+                int sock = ::socket(AF_UNIX, SOCK_DGRAM, 0);
+                if (sock < 0) {
                     PyErr_Format(PyExc_IOError,
-                        "Could not lock file: %s for exclusive access: %s", path, strerror(errno));
-                    ::close(self->fd);
-                    self->fd = -1;
+                        "Could not create socket for: %s: %s", path, strerror(errno));
                     return -1;
+                }
+
+                struct sockaddr_un addr;
+                memset(&addr, 0, sizeof(addr));
+                addr.sun_family = AF_UNIX;
+                strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+                if (::connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+                    PyErr_Format(PyExc_IOError,
+                        "Could not connect to socket: %s: %s", path, strerror(errno));
+                    ::close(sock);
+                    return -1;
+                }
+
+                self->fd = sock;
+                self->is_fifo = false;
+                self->is_socket = true;
+                self->output_buf_size = query_socket_sndbuf(sock);
+
+            } else {
+                int flags = O_WRONLY;
+                if (!path_is_fifo) flags |= O_CREAT | (append ? O_APPEND : O_TRUNC);
+
+                self->fd = ::open(path, flags, 0644);
+                if (self->fd < 0) {
+                    PyErr_Format(PyExc_IOError,
+                        "Could not open file: %s for writing: %s", path, strerror(errno));
+                    return -1;
+                }
+
+                self->is_fifo = path_is_fifo;
+                self->is_socket = false;
+                self->output_buf_size = path_is_fifo ? PIPE_BUF : 65536;
+
+                if (!path_is_fifo) {
+                    if (flock(self->fd, LOCK_EX | LOCK_NB) == -1) {
+                        PyErr_Format(PyExc_IOError,
+                            "Could not lock file: %s for exclusive access: %s", path, strerror(errno));
+                        ::close(self->fd);
+                        self->fd = -1;
+                        return -1;
+                    }
                 }
             }
 
@@ -416,6 +564,7 @@ namespace retracesoftware_stream {
 
             self->stored_path.~basic_string();
             self->writer_thread.~thread();
+            self->return_thread.~thread();
 
             Py_TYPE(self)->tp_free((PyObject*)self);
         }
@@ -452,12 +601,16 @@ namespace retracesoftware_stream {
         {NULL}
     };
 
-    void* AsyncFilePersister_setup(PyObject* persister, PyObject* serializer, size_t capacity) {
+    SetupResult AsyncFilePersister_setup(PyObject* persister, PyObject* serializer,
+                                         size_t queue_capacity,
+                                         size_t return_queue_capacity,
+                                         int64_t* inflight_ptr) {
         if (Py_TYPE(persister) != &AsyncFilePersister_Type) {
             PyErr_SetString(PyExc_TypeError, "expected AsyncFilePersister");
-            return nullptr;
+            return {nullptr, nullptr};
         }
-        return ((AsyncFilePersister*)persister)->setup(serializer, capacity);
+        return ((AsyncFilePersister*)persister)->setup(serializer, queue_capacity,
+                                                       return_queue_capacity, inflight_ptr);
     }
 
     PyTypeObject AsyncFilePersister_Type = {

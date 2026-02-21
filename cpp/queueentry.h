@@ -11,6 +11,22 @@ namespace retracesoftware_stream {
     //            bits [1:31]  = Cmd enum
     //            bits [32:63] = length / integer payload
 
+    inline int64_t estimate_size(PyObject* obj) {
+        if (obj == Py_None || obj == Py_True || obj == Py_False) return 0;
+        PyTypeObject* tp = Py_TYPE(obj);
+        if (tp == &PyLong_Type)   return 28;
+        if (tp == &PyFloat_Type)  return 24;
+        if (tp == &PyUnicode_Type)
+            return (int64_t)(sizeof(PyObject) + PyUnicode_GET_LENGTH(obj));
+        if (tp == &PyBytes_Type)
+            return (int64_t)(sizeof(PyObject) + PyBytes_GET_SIZE(obj));
+        if (tp == &PyMemoryView_Type) {
+            Py_buffer* view = PyMemoryView_GET_BUFFER(obj);
+            return (int64_t)(sizeof(PyObject) + view->len);
+        }
+        return 64;
+    }
+
     enum Cmd : uint32_t {
         CMD_BIND,
         CMD_EXT_BIND,
@@ -20,13 +36,15 @@ namespace retracesoftware_stream {
 
         CMD_HANDLE_REF,
         CMD_HANDLE_DELETE,
-        CMD_DROPPED,
 
-        CMD_MESSAGE_BOUNDARY,
         CMD_FLUSH,
         CMD_SHUTDOWN,
 
         CMD_PICKLED,
+
+        CMD_LIST,
+        CMD_TUPLE,
+        CMD_DICT,
     };
 
     inline uint64_t obj_entry(PyObject* p) {

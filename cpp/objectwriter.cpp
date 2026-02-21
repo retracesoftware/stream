@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
+#include <thread>
 #include <structmember.h>
 #include "wireformat.h"
 #include <algorithm>
@@ -84,15 +86,23 @@ namespace retracesoftware_stream {
         return dumps;
     }
 
-    static bool is_native_type(PyObject* obj) {
-        if (obj == Py_None) return true;
+    static inline int64_t native_estimate(PyObject* obj) {
+        if (obj == Py_None || obj == Py_True || obj == Py_False) return 0;
         PyTypeObject* tp = Py_TYPE(obj);
-        return tp == &PyLong_Type || tp == &PyUnicode_Type ||
-               tp == &PyFloat_Type || tp == &PyBytes_Type ||
-               tp == &PyBool_Type || tp == &PyTuple_Type ||
-               tp == &PyList_Type || tp == &PyDict_Type ||
-               tp == &StreamHandle_Type || tp == &PyMemoryView_Type ||
-               is_patched(tp->tp_free);
+        if (tp == &PyLong_Type)   return 28;
+        if (tp == &PyFloat_Type)  return 24;
+        if (tp == &PyUnicode_Type)
+            return (int64_t)(sizeof(PyObject) + PyUnicode_GET_LENGTH(obj));
+        if (tp == &PyBytes_Type)
+            return (int64_t)(sizeof(PyObject) + PyBytes_GET_SIZE(obj));
+        if (tp == &PyBool_Type)   return 0;
+        if (tp == &PyMemoryView_Type) {
+            Py_buffer* view = PyMemoryView_GET_BUFFER(obj);
+            return (int64_t)(sizeof(PyObject) + view->len);
+        }
+        if (tp == &StreamHandle_Type) return 64;
+        if (is_patched(tp->tp_free)) return 64;
+        return -1;
     }
 
     static thread_local bool writing = false;
@@ -119,6 +129,7 @@ namespace retracesoftware_stream {
     struct ObjectWriter : public ReaderWriterBase {
         
         rigtorp::SPSCQueue<uint64_t>* queue = nullptr;
+        rigtorp::SPSCQueue<PyObject*>* return_queue = nullptr;
         PyObject* persister = nullptr;
 
         size_t messages_written = 0;
@@ -131,19 +142,36 @@ namespace retracesoftware_stream {
         retracesoftware::FastCall thread;
         vectorcallfunc vectorcall;
         PyObject *weakreflist;
-        PyObject * backpressure_timeout_value = nullptr;
+
+        int64_t inflight_bytes = 0;
+        int64_t inflight_limit = 128LL * 1024 * 1024;
 
         inline bool is_disabled() const { return queue == nullptr; }
 
-        void push(uint64_t entry) {
-            if (queue->try_push(entry)) return;
-            Py_BEGIN_ALLOW_THREADS
-            queue->push(entry);
-            Py_END_ALLOW_THREADS
+        void wait_for_inflight() {
+            while (inflight_bytes > inflight_limit) {
+                Py_BEGIN_ALLOW_THREADS
+                std::this_thread::yield();
+                Py_END_ALLOW_THREADS
+                if (is_disabled()) return;
+            }
         }
 
-        void push_message_boundary() {
-            push(cmd_entry(CMD_MESSAGE_BOUNDARY));
+        void push(uint64_t entry) {
+            if (queue->try_push(entry)) return;
+            bool ok = false;
+            Py_BEGIN_ALLOW_THREADS
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (true) {
+                if (queue->try_push(entry)) { ok = true; break; }
+                if (std::chrono::steady_clock::now() >= deadline) break;
+                std::this_thread::yield();
+            }
+            Py_END_ALLOW_THREADS
+            if (!ok) {
+                fprintf(stderr, "retrace: writer queue full, disabling recording\n");
+                queue = nullptr;
+            }
         }
 
         void debug_prefix(size_t bytes_written = 0) {
@@ -185,12 +213,12 @@ namespace retracesoftware_stream {
 
             if (ext) {
                 push(cmd_entry(CMD_EXT_BIND));
-                Py_INCREF(obj);  push(obj_entry(obj));
+                Py_INCREF(obj);  inflight_bytes += estimate_size(obj); push(obj_entry(obj));
                 PyObject* type = (PyObject*)Py_TYPE(obj);
-                Py_INCREF(type); push(obj_entry(type));
+                Py_INCREF(type); inflight_bytes += estimate_size(type); push(obj_entry(type));
             } else {
                 push(cmd_entry(CMD_BIND));
-                Py_INCREF(obj);  push(obj_entry(obj));
+                Py_INCREF(obj);  inflight_bytes += estimate_size(obj); push(obj_entry(obj));
             }
             messages_written++;
         }
@@ -248,7 +276,7 @@ namespace retracesoftware_stream {
             }
 
             push(cmd_entry(CMD_NEW_HANDLE));
-            Py_INCREF(obj); push(obj_entry(obj));
+            Py_INCREF(obj); inflight_bytes += estimate_size(obj); push(obj_entry(obj));
             messages_written++;
             return stream_handle(next_handle++, verbose ? obj : nullptr);
         }
@@ -263,7 +291,66 @@ namespace retracesoftware_stream {
 
             push(cmd_entry(CMD_HANDLE_REF, obj->index));
             messages_written++;
-            push_message_boundary();
+        }
+
+        static constexpr int MAX_FLATTEN_DEPTH = 32;
+
+        void push_value(PyObject* obj, int depth = 0) {
+            int64_t est = native_estimate(obj);
+            if (est >= 0) {
+                Py_INCREF(obj);
+                inflight_bytes += est;
+                push(obj_entry(obj));
+                return;
+            }
+
+            PyTypeObject* tp = Py_TYPE(obj);
+
+            if (depth < MAX_FLATTEN_DEPTH) {
+                if (tp == &PyList_Type) {
+                    Py_ssize_t n = PyList_GET_SIZE(obj);
+                    push(cmd_entry(CMD_LIST, (uint32_t)n));
+                    for (Py_ssize_t i = 0; i < n; i++)
+                        push_value(PyList_GET_ITEM(obj, i), depth + 1);
+                    return;
+                }
+                if (tp == &PyTuple_Type) {
+                    Py_ssize_t n = PyTuple_GET_SIZE(obj);
+                    push(cmd_entry(CMD_TUPLE, (uint32_t)n));
+                    for (Py_ssize_t i = 0; i < n; i++)
+                        push_value(PyTuple_GET_ITEM(obj, i), depth + 1);
+                    return;
+                }
+                if (tp == &PyDict_Type) {
+                    Py_ssize_t n = PyDict_Size(obj);
+                    push(cmd_entry(CMD_DICT, (uint32_t)n));
+                    Py_ssize_t pos = 0;
+                    PyObject *key, *value;
+                    while (PyDict_Next(obj, &pos, &key, &value)) {
+                        push_value(key, depth + 1);
+                        push_value(value, depth + 1);
+                    }
+                    return;
+                }
+            } else if (tp == &PyList_Type || tp == &PyTuple_Type || tp == &PyDict_Type) {
+                Py_INCREF(obj);
+                inflight_bytes += estimate_size(obj);
+                push(obj_entry(obj));
+                return;
+            }
+
+            PyObject* dumps = pickle_dumps_fn();
+            PyObject* pickled = dumps ? PyObject_CallOneArg(dumps, obj) : nullptr;
+            if (pickled) {
+                push(cmd_entry(CMD_PICKLED));
+                inflight_bytes += (int64_t)(sizeof(PyObject) + PyBytes_GET_SIZE(pickled));
+                push(obj_entry(pickled));
+            } else {
+                PyErr_Clear();
+                Py_INCREF(obj);
+                inflight_bytes += estimate_size(obj);
+                push(obj_entry(obj));
+            }
         }
 
         void write_root(PyObject * obj) {
@@ -274,23 +361,8 @@ namespace retracesoftware_stream {
                 Py_DECREF(str);
             }
 
-            if (is_native_type(obj)) {
-                Py_INCREF(obj);
-                push(obj_entry(obj));
-            } else {
-                PyObject* dumps = pickle_dumps_fn();
-                PyObject* pickled = dumps ? PyObject_CallOneArg(dumps, obj) : nullptr;
-                if (pickled) {
-                    push(cmd_entry(CMD_PICKLED));
-                    push(obj_entry(pickled));
-                } else {
-                    PyErr_Clear();
-                    Py_INCREF(obj);
-                    push(obj_entry(obj));
-                }
-            }
+            push_value(obj);
             messages_written++;
-            push_message_boundary();
         }
 
         void object_freed(PyObject * obj) {
@@ -301,6 +373,9 @@ namespace retracesoftware_stream {
         }
 
         void write_all(StreamHandle * self, PyObject *const * args, size_t nargs) {
+
+            wait_for_inflight();
+            if (is_disabled()) return;
 
             check_thread();
 
@@ -313,6 +388,9 @@ namespace retracesoftware_stream {
         }
 
         void write_all(PyObject*const * args, size_t nargs) {
+
+            wait_for_inflight();
+            if (is_disabled()) return;
 
             check_thread();
 
@@ -410,6 +488,9 @@ namespace retracesoftware_stream {
             PyObject * preamble = nullptr;
 
             int verbose = 0;
+            long long inflight_limit_arg = 128LL * 1024 * 1024;
+            Py_ssize_t queue_capacity_arg = 65536;
+            Py_ssize_t return_queue_capacity_arg = 131072;
             
             static const char* kwlist[] = {
                 "output", 
@@ -418,10 +499,14 @@ namespace retracesoftware_stream {
                 "verbose", 
                 "normalize_path",
                 "preamble",
+                "inflight_limit",
+                "queue_capacity",
+                "return_queue_capacity",
                 nullptr};
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OpOO", (char **)kwlist, 
-                &output, &serializer, &thread, &verbose, &normalize_path, &preamble)) {
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OpOOLnn", (char **)kwlist, 
+                &output, &serializer, &thread, &verbose, &normalize_path, &preamble,
+                &inflight_limit_arg, &queue_capacity_arg, &return_queue_capacity_arg)) {
                 return -1;  
             }
 
@@ -440,12 +525,19 @@ namespace retracesoftware_stream {
             self->normalize_path = Py_XNewRef(normalize_path);
             self->enable_when = nullptr;
             self->queue = nullptr;
+            self->return_queue = nullptr;
             self->persister = nullptr;
+            self->inflight_bytes = 0;
+            self->inflight_limit = inflight_limit_arg;
 
             if (output != Py_None && Py_TYPE(output) == &AsyncFilePersister_Type) {
-                void* q = AsyncFilePersister_setup(output, serializer, 65536);
-                if (!q) return -1;
-                self->queue = (rigtorp::SPSCQueue<uint64_t>*)q;
+                SetupResult r = AsyncFilePersister_setup(output, serializer,
+                                                         (size_t)queue_capacity_arg,
+                                                         (size_t)return_queue_capacity_arg,
+                                                         &self->inflight_bytes);
+                if (!r.forward_queue) return -1;
+                self->queue = (rigtorp::SPSCQueue<uint64_t>*)r.forward_queue;
+                self->return_queue = (rigtorp::SPSCQueue<PyObject*>*)r.return_queue;
                 self->persister = Py_NewRef(output);
             }
 
@@ -490,6 +582,7 @@ namespace retracesoftware_stream {
                 }
                 push(cmd_entry(CMD_THREAD_SWITCH));
                 Py_INCREF(thread_handle);
+                inflight_bytes += estimate_size(thread_handle);
                 push(obj_entry(thread_handle));
                 messages_written++;
             }
@@ -500,7 +593,6 @@ namespace retracesoftware_stream {
             Py_VISIT(self->thread.callable);
             Py_VISIT(self->path);
             Py_VISIT(self->normalize_path);
-            Py_VISIT(self->backpressure_timeout_value);
             return 0;
         }
 
@@ -509,7 +601,6 @@ namespace retracesoftware_stream {
             Py_CLEAR(self->thread.callable);
             Py_CLEAR(self->path);
             Py_CLEAR(self->normalize_path);
-            Py_CLEAR(self->backpressure_timeout_value);
             return 0;
         }
 
@@ -566,33 +657,27 @@ namespace retracesoftware_stream {
             return 0;
         }
 
-        static PyObject * backpressure_timeout_getter(ObjectWriter *self, void *closure) {
-            if (self->backpressure_timeout_value == nullptr) {
-                Py_RETURN_NONE;
-            }
-            Py_INCREF(self->backpressure_timeout_value);
-            return self->backpressure_timeout_value;
+        static PyObject * bytes_written_getter(ObjectWriter *self, void *closure) {
+            return PyLong_FromLong(0);
         }
 
-        static int backpressure_timeout_setter(ObjectWriter *self, PyObject *value, void *closure) {
-            if (value == Py_None || value == nullptr) {
-                Py_XDECREF(self->backpressure_timeout_value);
-                self->backpressure_timeout_value = nullptr;
-                return 0;
-            }
-            double v = PyFloat_AsDouble(value);
-            if (v == -1.0 && PyErr_Occurred()) return -1;
-            if (v < 0) {
-                PyErr_SetString(PyExc_ValueError, "backpressure_timeout must be non-negative or None");
+        static PyObject * inflight_limit_getter(ObjectWriter *self, void *closure) {
+            return PyLong_FromLongLong(self->inflight_limit);
+        }
+
+        static int inflight_limit_setter(ObjectWriter *self, PyObject *value, void *closure) {
+            if (value == nullptr) {
+                PyErr_SetString(PyExc_AttributeError, "deletion of 'inflight_limit' is not allowed");
                 return -1;
             }
-            Py_XDECREF(self->backpressure_timeout_value);
-            self->backpressure_timeout_value = PyFloat_FromDouble(v);
+            long long v = PyLong_AsLongLong(value);
+            if (v == -1 && PyErr_Occurred()) return -1;
+            self->inflight_limit = (int64_t)v;
             return 0;
         }
 
-        static PyObject * bytes_written_getter(ObjectWriter *self, void *closure) {
-            return PyLong_FromLong(0);
+        static PyObject * inflight_bytes_getter(ObjectWriter *self, void *closure) {
+            return PyLong_FromLongLong(self->inflight_bytes);
         }
     };
 
@@ -610,19 +695,6 @@ namespace retracesoftware_stream {
     int StreamHandle_index(PyObject * streamhandle) {
         return reinterpret_cast<StreamHandle *>(streamhandle)->index;
     }
-
-    // --- BufferSlot type ---
-
-    PyTypeObject BufferSlot_Type = {
-        .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
-        .tp_name = MODULE "BufferSlot",
-        .tp_basicsize = sizeof(BufferSlot),
-        .tp_itemsize = 0,
-        .tp_dealloc = (destructor)BufferSlot::dealloc,
-        .tp_as_buffer = &BufferSlot_as_buffer,
-        .tp_flags = Py_TPFLAGS_DEFAULT,
-        .tp_doc = "Fixed-size buffer slot for serialization output",
-    };
 
     // --- StreamHandle type ---
 
@@ -664,7 +736,10 @@ namespace retracesoftware_stream {
         {"bytes_written", (getter)ObjectWriter::bytes_written_getter, nullptr, "TODO", NULL},
         {"path", (getter)ObjectWriter::path_getter, (setter)ObjectWriter::path_setter, "TODO", NULL},
         {"output", (getter)ObjectWriter::output_getter, (setter)ObjectWriter::output_setter, "Output callback", NULL},
-        {"backpressure_timeout", (getter)ObjectWriter::backpressure_timeout_getter, (setter)ObjectWriter::backpressure_timeout_setter, "Timeout in seconds before dropping messages under backpressure (None=wait forever, 0=drop immediately)", NULL},
+        {"inflight_limit", (getter)ObjectWriter::inflight_limit_getter, (setter)ObjectWriter::inflight_limit_setter,
+         "Maximum bytes in-flight between writer and persister", NULL},
+        {"inflight_bytes", (getter)ObjectWriter::inflight_bytes_getter, nullptr,
+         "Current estimated bytes in-flight", NULL},
         {NULL}
     };
 

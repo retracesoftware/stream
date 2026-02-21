@@ -1,14 +1,16 @@
 #include "stream.h"
 #include "wireformat.h"
-#include "bufferslot.h"
 #include <vector>
 #include <cstring>
 #include <chrono>
+#include <cerrno>
 
-#if defined(__GNUC__) || defined(__clang__)
-#define STREAM_LIKELY(x)   __builtin_expect(!!(x), 1)
-#else
-#define STREAM_LIKELY(x)   (x)
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
+#ifndef PIPE_BUF
+#define PIPE_BUF 512
 #endif
 
 namespace retracesoftware_stream {
@@ -40,97 +42,85 @@ namespace retracesoftware_stream {
 
     int StreamHandle_index(PyObject *);
 
+    using OutputFn = void(*)(void* ctx, const uint8_t* data, size_t size);
+
+    // PID-framed output: writes [pid:4][len:2][payload] frames to an fd.
+    // buf_size is clamped to MAX_FRAME so the 2-byte length field is always
+    // sufficient and syscall overhead is negligible at 64 KB.
+    struct PidFramedOutput {
+        static constexpr size_t FRAME_HEADER_SIZE = 6;
+        static constexpr size_t MAX_FRAME = 65536;
+
+        int fd;
+        size_t buf_size;
+        std::vector<uint8_t> frame_buf;
+
+        PidFramedOutput(int fd, size_t buf_size = PIPE_BUF)
+            : fd(fd),
+              buf_size(std::min(buf_size, MAX_FRAME)),
+              frame_buf(this->buf_size) {
+            stamp_pid();
+        }
+
+        void stamp_pid() {
+            uint32_t pid = (uint32_t)::getpid();
+            frame_buf[0] = (uint8_t)(pid);
+            frame_buf[1] = (uint8_t)(pid >> 8);
+            frame_buf[2] = (uint8_t)(pid >> 16);
+            frame_buf[3] = (uint8_t)(pid >> 24);
+        }
+
+        static void write(void* ctx, const uint8_t* data, size_t size) {
+            auto* self = static_cast<PidFramedOutput*>(ctx);
+            size_t max_payload = self->buf_size - FRAME_HEADER_SIZE;
+            while (size > 0) {
+                uint16_t chunk = (uint16_t)std::min(size, max_payload);
+                self->frame_buf[4] = (uint8_t)(chunk);
+                self->frame_buf[5] = (uint8_t)(chunk >> 8);
+                memcpy(self->frame_buf.data() + FRAME_HEADER_SIZE, data, chunk);
+
+                size_t frame_size = FRAME_HEADER_SIZE + chunk;
+                while (true) {
+                    ssize_t written = ::write(self->fd, self->frame_buf.data(), frame_size);
+                    if (written < 0) {
+                        if (errno == EINTR) continue;
+                        break;
+                    }
+                    break;
+                }
+                data += chunk;
+                size -= chunk;
+            }
+        }
+    };
+
     class PrimitiveStream {
-        static constexpr size_t BUFFER_SIZE = BUFFER_SLOT_SIZE;
-
-        BufferSlot* slots[2] = {nullptr, nullptr};
-        int active = 0;
-        size_t write_pos = 0;
+        std::vector<uint8_t> buffer;
         size_t bytes_written = 0;
-        PyObject* output_callback = nullptr;
+        OutputFn output_fn = nullptr;
+        void* output_ctx = nullptr;
         bool verbose = false;
-
-        size_t message_boundary = 0;
-        std::vector<uint8_t> overflow;
-        std::vector<uint8_t>* large_write_buffer = nullptr;
+        bool closed = false;
 
     public:
-        uint64_t dropped_messages = 0;
-        // -1 = wait forever, 0 = drop immediately, >0 = wait up to N ns then drop
-        int64_t backpressure_timeout_ns = -1;
-
         PrimitiveStream() = default;
 
-        PrimitiveStream(PyObject* output_callback) :
-            output_callback(Py_XNewRef(output_callback)) {
-
-            slots[0] = (BufferSlot*)BufferSlot_Type.tp_alloc(&BufferSlot_Type, 0);
-            slots[1] = (BufferSlot*)BufferSlot_Type.tp_alloc(&BufferSlot_Type, 0);
-
-            if (slots[0]) {
-                slots[0]->in_use.store(false, std::memory_order_relaxed);
-                slots[0]->used = 0;
-                slots[0]->message_count = 0;
-            }
-            if (slots[1]) {
-                slots[1]->in_use.store(false, std::memory_order_relaxed);
-                slots[1]->used = 0;
-                slots[1]->message_count = 0;
-            }
-            if (!slots[0] || !slots[1]) {
-                Py_XDECREF(slots[0]);
-                Py_XDECREF(slots[1]);
-                slots[0] = slots[1] = nullptr;
-                Py_XDECREF(output_callback);
-                this->output_callback = nullptr;
-                throw nullptr;
-            }
+        PrimitiveStream(OutputFn fn, void* ctx) : output_fn(fn), output_ctx(ctx) {
+            buffer.reserve(65536);
         }
 
         ~PrimitiveStream() { close(); }
 
         inline size_t get_bytes_written() const { return this->bytes_written; }
 
-        void traverse(visitproc visit, void* arg) {
-            if (output_callback) visit(output_callback, arg);
-            if (slots[0]) visit((PyObject*)slots[0], arg);
-            if (slots[1]) visit((PyObject*)slots[1], arg);
-        }
-
-        void gc_clear() {
-            Py_CLEAR(output_callback);
-            if (slots[0]) { Py_DECREF(slots[0]); slots[0] = nullptr; }
-            if (slots[1]) { Py_DECREF(slots[1]); slots[1] = nullptr; }
-        }
-
         void close() {
-            if (output_callback) {
+            if (!closed && output_fn) {
                 flush();
-                Py_CLEAR(output_callback);
             }
-            if (slots[0]) { Py_DECREF(slots[0]); slots[0] = nullptr; }
-            if (slots[1]) { Py_DECREF(slots[1]); slots[1] = nullptr; }
+            closed = true;
         }
 
-        // Returns true if the slot became available, false if timeout expired (should drop).
-        // Caller must hold the GIL on entry; GIL is released during the wait.
-        inline bool wait_for_slot(int slot_idx) {
-            if (backpressure_timeout_ns == 0) return false;
-            if (backpressure_timeout_ns < 0) {
-                Py_BEGIN_ALLOW_THREADS
-                while (slots[slot_idx]->in_use.load(std::memory_order_acquire)) {}
-                Py_END_ALLOW_THREADS
-                return true;
-            }
-            auto deadline = std::chrono::steady_clock::now()
-                          + std::chrono::nanoseconds(backpressure_timeout_ns);
-            Py_BEGIN_ALLOW_THREADS
-            while (slots[slot_idx]->in_use.load(std::memory_order_acquire)) {
-                if (std::chrono::steady_clock::now() >= deadline) break;
-            }
-            Py_END_ALLOW_THREADS
-            return !slots[slot_idx]->in_use.load(std::memory_order_acquire);
-        }
+        bool is_closed() const { return closed || !output_fn; }
 
         void write_handle_ref(int handle) {
             write_unsigned_number(SizedTypes::HANDLE, handle);
@@ -171,70 +161,7 @@ namespace retracesoftware_stream {
         }
 
         inline void write(const uint8_t * bytes, Py_ssize_t size) {
-            assert(bytes);
-
-            if (large_write_buffer) {
-                large_write_buffer->insert(large_write_buffer->end(), bytes, bytes + size);
-                bytes_written += size;
-                return;
-            }
-
-            assert(output_callback);
-
-            if (write_pos + (size_t)size > BUFFER_SIZE) {
-                if (message_boundary > 0) {
-                    size_t tail = write_pos - message_boundary;
-
-                    int full = active;
-                    slots[full]->used = message_boundary;
-
-                    active = 1 - active;
-                    if (slots[active]->in_use.load(std::memory_order_acquire)) {
-                        if (!wait_for_slot(active)) {
-                            dropped_messages += slots[full]->message_count;
-                            memmove(slots[full]->data,
-                                    slots[full]->data + message_boundary, tail);
-                            write_pos = tail;
-                            message_boundary = 0;
-                            slots[full]->message_count = 0;
-                            active = full;
-                            goto do_write;
-                        }
-                    }
-
-                    memcpy(slots[active]->data, slots[full]->data + message_boundary, tail);
-                    write_pos = tail;
-                    message_boundary = 0;
-                    slots[full]->message_count = 0;
-
-                    PyObject* mv = PyMemoryView_FromObject((PyObject*)slots[full]);
-                    if (!mv) throw nullptr;
-                    PyObject* result = PyObject_CallOneArg(output_callback, mv);
-                    Py_DECREF(mv);
-                    if (!result) throw nullptr;
-                    Py_DECREF(result);
-
-                } else {
-                    overflow.assign(slots[active]->data,
-                                    slots[active]->data + write_pos);
-                    large_write_buffer = &overflow;
-                    write_pos = 0;
-
-                    large_write_buffer->insert(large_write_buffer->end(),
-                                               bytes, bytes + size);
-                    bytes_written += size;
-                    return;
-                }
-            }
-
-        do_write:
-            if (write_pos + (size_t)size > BUFFER_SIZE) {
-                write(bytes, size);
-                return;
-            }
-
-            memcpy(slots[active]->data + write_pos, bytes, size);
-            write_pos += size;
+            buffer.insert(buffer.end(), bytes, bytes + size);
             bytes_written += size;
         }
 
@@ -243,12 +170,8 @@ namespace retracesoftware_stream {
         }
 
         inline void write(uint8_t value) {
-            if (STREAM_LIKELY(!large_write_buffer && write_pos < BUFFER_SIZE)) {
-                slots[active]->data[write_pos++] = value;
-                bytes_written++;
-                return;
-            }
-            write(&value, sizeof(value));
+            buffer.push_back(value);
+            bytes_written++;
         }
 
         inline void write(int8_t value) {
@@ -257,12 +180,6 @@ namespace retracesoftware_stream {
 
         inline void write(uint16_t value) {
             value = to_le(value);
-            if (STREAM_LIKELY(!large_write_buffer && write_pos + sizeof(value) <= BUFFER_SIZE)) {
-                memcpy(slots[active]->data + write_pos, &value, sizeof(value));
-                write_pos += sizeof(value);
-                bytes_written += sizeof(value);
-                return;
-            }
             write(reinterpret_cast<const uint8_t*>(&value), (Py_ssize_t)sizeof(value));
         }
 
@@ -272,12 +189,6 @@ namespace retracesoftware_stream {
 
         inline void write(uint32_t value) {
             value = to_le(value);
-            if (STREAM_LIKELY(!large_write_buffer && write_pos + sizeof(value) <= BUFFER_SIZE)) {
-                memcpy(slots[active]->data + write_pos, &value, sizeof(value));
-                write_pos += sizeof(value);
-                bytes_written += sizeof(value);
-                return;
-            }
             write(reinterpret_cast<const uint8_t*>(&value), (Py_ssize_t)sizeof(value));
         }
 
@@ -287,12 +198,6 @@ namespace retracesoftware_stream {
 
         inline void write(uint64_t value) {
             value = to_le(value);
-            if (STREAM_LIKELY(!large_write_buffer && write_pos + sizeof(value) <= BUFFER_SIZE)) {
-                memcpy(slots[active]->data + write_pos, &value, sizeof(value));
-                write_pos += sizeof(value);
-                bytes_written += sizeof(value);
-                return;
-            }
             write(reinterpret_cast<const uint8_t*>(&value), (Py_ssize_t)sizeof(value));
         }
 
@@ -356,19 +261,6 @@ namespace retracesoftware_stream {
         void write_str(PyObject * obj) {
             Py_ssize_t size;
             const char * utf8 = PyUnicode_AsUTF8AndSize(obj, &size);
-
-            if (STREAM_LIKELY(!verbose && size <= 11 && !large_write_buffer
-                              && write_pos + 1 + (size_t)size <= BUFFER_SIZE)) {
-                Control control;
-                control.Sized.type = SizedTypes::STR;
-                control.Sized.size = (Sizes)size;
-                uint8_t* dst = slots[active]->data + write_pos;
-                dst[0] = control.raw;
-                memcpy(dst + 1, utf8, size);
-                write_pos += 1 + size;
-                bytes_written += 1 + size;
-                return;
-            }
 
             write_size(SizedTypes::STR, (int)size);
             write((const uint8_t *)utf8, size);
@@ -470,62 +362,10 @@ namespace retracesoftware_stream {
             write(create_fixed_size(obj));
         }
 
-        bool is_closed() const { return output_callback == nullptr; }
-
-        void mark_message_boundary() {
-            if (large_write_buffer) {
-                PyObject* bytes_obj = PyBytes_FromStringAndSize(
-                    (const char*)large_write_buffer->data(),
-                    large_write_buffer->size());
-                large_write_buffer->clear();
-                large_write_buffer = nullptr;
-                if (!bytes_obj) throw nullptr;
-
-                PyObject* result = PyObject_CallOneArg(output_callback, bytes_obj);
-                Py_DECREF(bytes_obj);
-                if (!result) throw nullptr;
-                Py_DECREF(result);
-            }
-            message_boundary = write_pos;
-            if (slots[active]) slots[active]->message_count++;
-        }
-
         void flush() {
-            if (write_pos == 0 || !output_callback) return;
-
-            int full = active;
-            slots[full]->used = write_pos;
-
-            active = 1 - active;
-            if (slots[active]->in_use.load(std::memory_order_acquire)) {
-                if (!wait_for_slot(active)) {
-                    dropped_messages += slots[full]->message_count;
-                    write_pos = 0;
-                    message_boundary = 0;
-                    slots[full]->message_count = 0;
-                    active = full;
-                    return;
-                }
-            }
-            write_pos = 0;
-            message_boundary = 0;
-            slots[full]->message_count = 0;
-
-            PyObject* mv = PyMemoryView_FromObject((PyObject*)slots[full]);
-            if (!mv) throw nullptr;
-
-            PyObject* result = PyObject_CallOneArg(output_callback, mv);
-            Py_DECREF(mv);
-
-            if (!result) throw nullptr;
-            Py_DECREF(result);
-        }
-
-        PyObject* get_output_callback() const { return output_callback; }
-
-        void set_output_callback(PyObject* cb) {
-            Py_XDECREF(output_callback);
-            output_callback = Py_XNewRef(cb);
+            if (!output_fn || buffer.empty()) return;
+            output_fn(output_ctx, buffer.data(), buffer.size());
+            buffer.clear();
         }
     };
 
@@ -689,10 +529,8 @@ namespace retracesoftware_stream {
         
         MessageStream() = default;
 
-        MessageStream(
-            PyObject * output_callback,
-            PyObject * serializer) : 
-            stream(output_callback), 
+        MessageStream(OutputFn fn, void* ctx, PyObject * serializer) :
+            stream(fn, ctx),
             serializer(Py_XNewRef(serializer)) {
         }
 
@@ -704,7 +542,6 @@ namespace retracesoftware_stream {
         }
 
         void traverse(visitproc visit, void* arg) {
-            stream.traverse(visit, arg);
             if (serializer) visit(serializer, arg);
             for (auto& [key, value] : interned_index) {
                 visit(key, arg);
@@ -712,7 +549,6 @@ namespace retracesoftware_stream {
         }
 
         void gc_clear() {
-            stream.gc_clear();
             Py_CLEAR(serializer);
             for (auto& [key, value] : interned_index) {
                 Py_DECREF(key);
@@ -838,26 +674,13 @@ namespace retracesoftware_stream {
 
         void flush() { stream.flush(); }
 
-        PyObject* get_output_callback() const { return stream.get_output_callback(); }
-
-        void set_output_callback(PyObject* cb) { stream.set_output_callback(cb); }
-
-        void mark_message_boundary() { stream.mark_message_boundary(); }
-
-        uint64_t get_dropped_messages() const { return stream.dropped_messages; }
-        void reset_dropped_messages() { stream.dropped_messages = 0; }
-
-        int64_t get_backpressure_timeout_ns() const { return stream.backpressure_timeout_ns; }
-        void set_backpressure_timeout_ns(int64_t ns) { stream.backpressure_timeout_ns = ns; }
-
-        void write_dropped_marker(uint64_t count) {
-            stream.write(Dropped);
-            stream.write_sized_int(count);
-        }
-
         void write_pre_pickled(PyObject* bytes_obj) {
             assert(PyBytes_Check(bytes_obj));
             stream.write_pickled(bytes_obj);
         }
+
+        void write_list_header(size_t n) { stream.write_size(SizedTypes::LIST, n); }
+        void write_tuple_header(size_t n) { stream.write_tuple_header(n); }
+        void write_dict_header(size_t n) { stream.write_dict_header(n); }
     };
 }

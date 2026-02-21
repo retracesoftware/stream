@@ -1,11 +1,8 @@
 #include "stream.h"
-#include "bufferslot.h"
 #include "wireformat.h"
 
 static PyTypeObject * hidden_types[] = {
-    &retracesoftware_stream::BufferSlot_Type,
     &retracesoftware_stream::StreamHandle_Type,
-    &retracesoftware_stream::SyncPidWriter_Type,
     nullptr
 };
 

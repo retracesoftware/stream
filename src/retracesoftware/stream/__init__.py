@@ -184,9 +184,9 @@ class writer(_backend_mod.ObjectWriter):
                  flush_interval=0.1,
                  verbose=False,
                  disable_retrace=None,
-                 backpressure_timeout=None,
                  preamble=None,
-                 append=False):
+                 append=False,
+                 inflight_limit=None):
 
         if output is None and path is not None:
             output = _backend_mod.AsyncFilePersister(str(path), append=append)
@@ -194,12 +194,14 @@ class writer(_backend_mod.ObjectWriter):
         self._output = output
         self._disable_retrace = disable_retrace
 
-        super().__init__(output, thread=thread, serializer=self.serialize,
-                        verbose=verbose,
-                        normalize_path=normalize_path,
-                        preamble=preamble)
+        kwargs = dict(thread=thread, serializer=self.serialize,
+                      verbose=verbose,
+                      normalize_path=normalize_path,
+                      preamble=preamble)
+        if inflight_limit is not None:
+            kwargs['inflight_limit'] = inflight_limit
 
-        self.backpressure_timeout = backpressure_timeout
+        super().__init__(output, **kwargs)
 
         if path is not None:
             self.path = path
@@ -291,10 +293,6 @@ class ThreadSwitch(Control):
     pass
 
 
-class Dropped(Control):
-    pass
-
-
 def per_thread(source, thread, timeout):
     import retracesoftware.utils as utils
 
@@ -319,8 +317,7 @@ class reader(_backend_mod.ObjectStreamReader):
             on_thread_switch=ThreadSwitch,
             create_stack_delta=lambda to_drop, frames: None,
             read_timeout=read_timeout,
-            verbose=verbose,
-            on_dropped=Dropped)
+            verbose=verbose)
 
         self.type_deserializer = {}
 
