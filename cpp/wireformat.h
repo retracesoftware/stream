@@ -69,21 +69,17 @@ namespace retracesoftware_stream {
 
         NEG1,
         INT64,
-
-        // REF,
-        
-        // root types?
-        
         EXT_BIND,
-
-        // root only types
         THREAD_SWITCH,
+        
         NEW_HANDLE,
         BIND,
         STACK,
         ADD_FILENAME,
+        
         CHECKSUM,
         DROPPED,
+        HEARTBEAT,
 
         FixedSizeTypes__LAST__,
     };
@@ -144,6 +140,7 @@ namespace retracesoftware_stream {
 
     constexpr Control Checksum = create_fixed_size(FixedSizeTypes::CHECKSUM);
     constexpr Control Dropped = create_fixed_size(FixedSizeTypes::DROPPED);
+    constexpr Control Heartbeat = create_fixed_size(FixedSizeTypes::HEARTBEAT);
     constexpr Control Bind = create_fixed_size(FixedSizeTypes::BIND);
     constexpr Control ExtBind = create_fixed_size(FixedSizeTypes::EXT_BIND);
     // constexpr Control BindingDelete = create_fixed_size(FixedSizeTypes::);
@@ -228,6 +225,7 @@ namespace retracesoftware_stream {
             case FixedSizeTypes::ADD_FILENAME: return "ADD_FILENAME";
             case FixedSizeTypes::CHECKSUM: return "CHECKSUM";
             case FixedSizeTypes::DROPPED: return "DROPPED";
+            case FixedSizeTypes::HEARTBEAT: return "HEARTBEAT";
             default: return nullptr;
         }
     }

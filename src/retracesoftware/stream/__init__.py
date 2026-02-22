@@ -5,8 +5,6 @@ Set RETRACE_DEBUG=1 to use the debug build with symbols and assertions.
 """
 import os
 import pickle
-import inspect
-import struct
 import threading
 import time
 import weakref
@@ -56,9 +54,6 @@ _export_public(_backend_mod)
 # ---------------------------------------------------------------------------
 # High-level API (convenience wrappers around C++ extension)
 # ---------------------------------------------------------------------------
-
-def replace_prefix(s, old_prefix, new_prefix):
-    return new_prefix + s[len(old_prefix):] if s.startswith(old_prefix) else s
 
 def call_periodically(interval, func):
     ref = weakref.ref(func)
@@ -140,44 +135,6 @@ def list_pids(path):
     return pids
 
 
-class FileOutput:
-    """Default output callback -- writes PID-framed data to a file with exclusive lock."""
-
-    _FRAME_HEADER = struct.Struct('<IH')
-
-    def __init__(self, path, append=False):
-        import fcntl
-        mode = 'ab' if append else 'wb'
-        self._file = open(str(path), mode)
-        fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self._pid = os.getpid()
-
-    def __call__(self, data):
-        raw = bytes(data)
-        offset = 0
-        while offset < len(raw):
-            chunk = min(len(raw) - offset, 0xFFFF)
-            self._file.write(self._FRAME_HEADER.pack(self._pid, chunk))
-            self._file.write(raw[offset:offset + chunk])
-            offset += chunk
-
-    def close(self):
-        if self._file:
-            self._file.close()
-            self._file = None
-
-
-def _append_write(path, data):
-    """Fork-safe synchronous writer: opens in append mode, writes, closes."""
-    with open(str(path), 'ab') as f:
-        f.write(data)
-
-
-def _fd_write(fd, data):
-    """Synchronous write to an open file descriptor."""
-    os.write(fd, bytes(data))
-
-
 class writer(_backend_mod.ObjectWriter):
 
     def __init__(self, path=None, thread=None, output=None,
@@ -223,7 +180,7 @@ class writer(_backend_mod.ObjectWriter):
         except ImportError:
             pass
 
-        call_periodically(interval=flush_interval, func=self.flush)
+        call_periodically(interval=flush_interval, func=self.heartbeat)
 
         if path is not None and hasattr(os, 'register_at_fork'):
             os.register_at_fork(
@@ -243,6 +200,17 @@ class writer(_backend_mod.ObjectWriter):
 
     def serialize(self, obj):
         return self.type_serializer.get(type(obj), pickle.dumps)(obj)
+
+    def heartbeat(self):
+        import resource
+        payload = {
+            'ts': time.time(),
+            'inflight': self.inflight_bytes,
+            'messages': self.messages_written,
+            'rss': resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+            'threads': threading.active_count(),
+        }
+        super().heartbeat(payload)
 
     # -- Fork safety ----------------------------------------------------------
     # PID-framed writes (each <= PIPE_BUF) let parent and child share the
@@ -302,9 +270,14 @@ class ThreadSwitch(Control):
     pass
 
 
+class Heartbeat(Control):
+    pass
+
+
 def per_thread(source, thread, timeout):
     import retracesoftware.utils as utils
 
+    is_control = functional.isinstanceof((ThreadSwitch, Heartbeat))
     is_thread_switch = functional.isinstanceof(ThreadSwitch)
     
     key_fn = StickyPred(
@@ -313,7 +286,7 @@ def per_thread(source, thread, timeout):
         initial=thread())
 
     demux = utils.demux(source=source, key_function=key_fn, timeout_seconds=timeout)
-    return drop(is_thread_switch, functional.sequence(thread, demux))
+    return drop(is_control, functional.sequence(thread, demux))
 
 
 class reader(_backend_mod.ObjectStreamReader):
@@ -326,7 +299,8 @@ class reader(_backend_mod.ObjectStreamReader):
             on_thread_switch=ThreadSwitch,
             create_stack_delta=lambda to_drop, frames: None,
             read_timeout=read_timeout,
-            verbose=verbose)
+            verbose=verbose,
+            on_heartbeat=Heartbeat)
 
         self.type_deserializer = {}
 

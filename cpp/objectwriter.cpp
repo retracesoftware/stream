@@ -472,6 +472,22 @@ namespace retracesoftware_stream {
             }
         }
 
+        static PyObject* py_heartbeat(ObjectWriter* self, PyObject* payload) {
+            if (self->is_disabled()) Py_RETURN_NONE;
+            if (!PyDict_Check(payload)) {
+                PyErr_SetString(PyExc_TypeError, "heartbeat payload must be a dict");
+                return nullptr;
+            }
+            try {
+                self->push(cmd_entry(CMD_HEARTBEAT));
+                self->push_value(payload);
+                self->push(cmd_entry(CMD_FLUSH));
+                Py_RETURN_NONE;
+            } catch (...) {
+                return nullptr;
+            }
+        }
+
         static PyObject * py_handle(ObjectWriter * self, PyObject* obj) {
             try {
                 return self->handle(obj);
@@ -782,6 +798,7 @@ namespace retracesoftware_stream {
     static PyMethodDef methods[] = {
         {"handle", (PyCFunction)ObjectWriter::py_handle, METH_O, "Creates handle"},
         {"flush", (PyCFunction)ObjectWriter::py_flush, METH_NOARGS, "Flush buffered data to the output callback"},
+        {"heartbeat", (PyCFunction)ObjectWriter::py_heartbeat, METH_O, "Push heartbeat payload dict and flush"},
         {"bind", (PyCFunction)ObjectWriter::py_bind, METH_O, "TODO"},
         {"ext_bind", (PyCFunction)ObjectWriter::py_ext_bind, METH_O, "TODO"},
         {NULL}

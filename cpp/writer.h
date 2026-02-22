@@ -560,6 +560,10 @@ namespace retracesoftware_stream {
             return bindings.contains(obj);
         }
 
+        void write_control(Control c) {
+            stream.write(c);
+        }
+
         void write_handle_delete(int delta) {
             stream.write_unsigned_number(SizedTypes::DELETE, delta);
         }

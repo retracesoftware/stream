@@ -223,6 +223,10 @@ namespace retracesoftware_stream {
                                     }
                                     break;
                                 }
+                                case CMD_HEARTBEAT:
+                                    try { self->stream->write_control(Heartbeat); } catch (...) { PyErr_Clear(); }
+                                    self->consume_and_write_value();
+                                    break;
                                 case CMD_SHUTDOWN:
                                     try { self->stream->flush(); } catch (...) { PyErr_Clear(); }
                                     self->processed_cursor.fetch_add(1, std::memory_order_release);
@@ -324,6 +328,9 @@ namespace retracesoftware_stream {
                             Py_DECREF(as_ptr(*queue->front()));
                             queue->pop();
                             break;
+                        case CMD_HEARTBEAT:
+                            drain_value();
+                            break;
                         default: break;
                     }
                     break;
@@ -369,6 +376,9 @@ namespace retracesoftware_stream {
                                 break;
                             case CMD_DICT:
                                 for (uint32_t i = 0, n = len_of(e) * 2; i < n; i++) drain_value();
+                                break;
+                            case CMD_HEARTBEAT:
+                                drain_value();
                                 break;
                             default: break;
                         }

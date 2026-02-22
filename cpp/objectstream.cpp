@@ -55,6 +55,7 @@ namespace retracesoftware_stream {
         PyObject * create_stack_delta;
         PyObject * create_thread_switch;
         PyObject * create_dropped = nullptr;
+        PyObject * create_heartbeat = nullptr;
         bool verbose = false;
 
         // PID-framed reading state
@@ -78,6 +79,7 @@ namespace retracesoftware_stream {
             PyObject * create_stack_delta;
             PyObject * create_thread_switch;
             PyObject * create_dropped = nullptr;
+            PyObject * create_heartbeat = nullptr;
 
             int read_timeout = 0;
             int verbose = 0;
@@ -91,9 +93,10 @@ namespace retracesoftware_stream {
                 "read_timeout",
                 "verbose",
                 "on_dropped",
+                "on_heartbeat",
                 nullptr};
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOip|O", (char **)kwlist, 
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOip|OO", (char **)kwlist, 
                 &PyUnicode_Type, &path, 
                 &create_pickled,
                 &bind_singleton,
@@ -101,7 +104,8 @@ namespace retracesoftware_stream {
                 &create_thread_switch,
                 &read_timeout,
                 &verbose,
-                &create_dropped)) {
+                &create_dropped,
+                &create_heartbeat)) {
                 return -1;
             }
 
@@ -118,6 +122,7 @@ namespace retracesoftware_stream {
             self->create_stack_delta = Py_NewRef(create_stack_delta);
             self->create_thread_switch = Py_NewRef(create_thread_switch);
             self->create_dropped = Py_XNewRef(create_dropped);
+            self->create_heartbeat = Py_XNewRef(create_heartbeat);
             self->read_timeout = read_timeout;
             self->verbose = verbose;
 
@@ -167,6 +172,7 @@ namespace retracesoftware_stream {
             Py_VISIT(self->create_stack_delta);
             Py_VISIT(self->create_thread_switch);
             Py_VISIT(self->create_dropped);
+            Py_VISIT(self->create_heartbeat);
 
             return 0;
         }
@@ -193,6 +199,7 @@ namespace retracesoftware_stream {
             Py_CLEAR(self->create_stack_delta);
             Py_CLEAR(self->create_thread_switch);
             Py_CLEAR(self->create_dropped);
+            Py_CLEAR(self->create_heartbeat);
 
             return 0;
         }
@@ -815,6 +822,20 @@ namespace retracesoftware_stream {
                     return result;
                 }
                 Py_DECREF(count);
+                return next();
+            }
+            if (control == Heartbeat) {
+                PyObject * payload = read();
+                if (verbose) {
+                    printf("Retrace - ObjectStream[%lu, %lu] - Consumed HEARTBEAT\n", messages_read, start);
+                }
+                messages_read++;
+                if (create_heartbeat) {
+                    PyObject * result = PyObject_CallOneArg(create_heartbeat, payload);
+                    Py_DECREF(payload);
+                    return result;
+                }
+                Py_DECREF(payload);
                 return next();
             }
             if (control == Bind) {

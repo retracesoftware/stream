@@ -68,6 +68,7 @@ namespace retracesoftware_stream {
         CMD_LIST,
         CMD_TUPLE,
         CMD_DICT,
+        CMD_HEARTBEAT,
     };
 
 }
