@@ -3,6 +3,7 @@
 
 static PyTypeObject * hidden_types[] = {
     &retracesoftware_stream::StreamHandle_Type,
+    &retracesoftware_stream::Deleter_Type,
     nullptr
 };
 

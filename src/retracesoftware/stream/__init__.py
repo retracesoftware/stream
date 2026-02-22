@@ -186,7 +186,10 @@ class writer(_backend_mod.ObjectWriter):
                  disable_retrace=None,
                  preamble=None,
                  append=False,
-                 inflight_limit=None):
+                 inflight_limit=None,
+                 stall_timeout=None,
+                 queue_capacity=None,
+                 return_queue_capacity=None):
 
         if output is None and path is not None:
             output = _backend_mod.AsyncFilePersister(str(path), append=append)
@@ -200,6 +203,12 @@ class writer(_backend_mod.ObjectWriter):
                       preamble=preamble)
         if inflight_limit is not None:
             kwargs['inflight_limit'] = inflight_limit
+        if stall_timeout is not None:
+            kwargs['stall_timeout'] = stall_timeout
+        if queue_capacity is not None:
+            kwargs['queue_capacity'] = queue_capacity
+        if return_queue_capacity is not None:
+            kwargs['return_queue_capacity'] = return_queue_capacity
 
         super().__init__(output, **kwargs)
 

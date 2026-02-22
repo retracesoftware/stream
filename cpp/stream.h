@@ -3,6 +3,7 @@
 // #include <nanobind/nanobind.h>
 
 #include <algorithm>
+#include <atomic>
 #include <signal.h>
 #include <string>
 #include <vector>
@@ -88,6 +89,7 @@ namespace retracesoftware_stream {
     extern PyTypeObject StreamHandle_Type;
     extern PyTypeObject ObjectStream_Type;
     extern PyTypeObject AsyncFilePersister_Type;
+    extern PyTypeObject Deleter_Type;
 
     struct SetupResult {
         void* forward_queue;    // SPSCQueue<uint64_t>*
@@ -95,12 +97,15 @@ namespace retracesoftware_stream {
     };
 
     // Defined in persister.cpp — called by ObjectWriter during init.
-    // inflight_ptr points to the ObjectWriter's inflight_bytes counter
-    // (updated by the drain thread under the GIL).
+    // writer_key is the ObjectWriter* cast to PyObject*, used as a dict
+    // key to look up thread handles from PyThreadState.dict.
+    // total_removed points to the ObjectWriter's atomic counter that the
+    // drain thread increments as objects are returned.
     SetupResult AsyncFilePersister_setup(PyObject* persister, PyObject* serializer,
                                          size_t queue_capacity,
                                          size_t return_queue_capacity,
-                                         int64_t* inflight_ptr);
+                                         std::atomic<int64_t>* total_removed,
+                                         PyObject* writer_key);
 
     // extern PyTypeObject WeakRefCallback_Type;
     // extern PyTypeObject ObjectReader_Type;
