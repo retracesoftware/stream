@@ -92,7 +92,7 @@ namespace retracesoftware_stream {
     extern PyTypeObject Deleter_Type;
 
     struct SetupResult {
-        void* forward_queue;    // SPSCQueue<uint64_t>*
+        void* forward_queue;    // SPSCQueue<QEntry>*
         void* return_queue;     // SPSCQueue<PyObject*>*
     };
 

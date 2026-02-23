@@ -126,7 +126,7 @@ namespace retracesoftware_stream {
 
     struct ObjectWriter : public ReaderWriterBase {
         
-        rigtorp::SPSCQueue<uint64_t>* queue = nullptr;
+        rigtorp::SPSCQueue<QEntry>* queue = nullptr;
         rigtorp::SPSCQueue<PyObject*>* return_queue = nullptr;
         PyObject* persister = nullptr;
 
@@ -171,7 +171,7 @@ namespace retracesoftware_stream {
             }
         }
 
-        bool blocking_push(uint64_t entry) {
+        bool blocking_push(QEntry entry) {
             bool ok = false;
             Py_BEGIN_ALLOW_THREADS
             auto deadline = std::chrono::steady_clock::now()
@@ -185,7 +185,7 @@ namespace retracesoftware_stream {
             return ok;
         }
 
-        void push(uint64_t entry) {
+        void push(QEntry entry) {
             if (!queue->try_push(entry) && !blocking_push(entry)) {
                 fprintf(stderr, "retrace: writer queue full, disabling recording\n");
                 queue = nullptr;
@@ -231,7 +231,12 @@ namespace retracesoftware_stream {
 
             Py_INCREF(obj);
             total_added += estimate_size(obj);
+#if SIZEOF_VOID_P >= 8
             push(ext ? ext_bind_entry(obj) : bind_entry(obj));
+#else
+            push(cmd_entry(ext ? CMD_EXT_BIND : CMD_BIND));
+            push(obj_entry(obj));
+#endif
             messages_written++;
         }
 
@@ -287,7 +292,13 @@ namespace retracesoftware_stream {
                 Py_DECREF(str);
             }
 
-            Py_INCREF(obj); total_added += estimate_size(obj); push(new_handle_entry(obj));
+            Py_INCREF(obj); total_added += estimate_size(obj);
+#if SIZEOF_VOID_P >= 8
+            push(new_handle_entry(obj));
+#else
+            push(cmd_entry(CMD_NEW_HANDLE));
+            push(obj_entry(obj));
+#endif
             messages_written++;
             return stream_handle(next_handle++, verbose ? obj : nullptr);
         }
@@ -363,7 +374,12 @@ namespace retracesoftware_stream {
                     PyObject* pickled = dumps ? PyObject_CallOneArg(dumps, obj) : nullptr;
                     if (pickled) {
                         total_added += estimate_bytes_size(pickled);
+#if SIZEOF_VOID_P >= 8
                         push(pickled_entry(pickled));
+#else
+                        push(cmd_entry(CMD_PICKLED));
+                        push(obj_entry(pickled));
+#endif
                     } else {
                         PyErr_Clear();
                         Py_INCREF(obj);
@@ -573,7 +589,7 @@ namespace retracesoftware_stream {
                                                          &self->total_removed,
                                                          self->thread);
                 if (!r.forward_queue) return -1;
-                self->queue = (rigtorp::SPSCQueue<uint64_t>*)r.forward_queue;
+                self->queue = (rigtorp::SPSCQueue<QEntry>*)r.forward_queue;
                 self->return_queue = (rigtorp::SPSCQueue<PyObject*>*)r.return_queue;
                 self->persister = Py_NewRef(output);
             }

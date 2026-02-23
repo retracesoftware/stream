@@ -26,7 +26,7 @@ namespace retracesoftware_stream {
     //
     // Owns the SPSC queue consumer side, a MessageStream for
     // serialization, and a background thread that processes entries.
-    // ObjectWriter pushes tagged uint64_t entries; the persister
+    // ObjectWriter pushes tagged QEntry values; the persister
     // thread deserializes objects and writes PID-framed output.
 
     struct AsyncFilePersister : PyObject {
@@ -42,7 +42,7 @@ namespace retracesoftware_stream {
         bool thread_started;
         std::string stored_path;
 
-        rigtorp::SPSCQueue<uint64_t>* queue;
+        rigtorp::SPSCQueue<QEntry>* queue;
         rigtorp::SPSCQueue<PyObject*>* return_queue;
         PidFramedOutput* output;
         MessageStream* stream;
@@ -54,10 +54,10 @@ namespace retracesoftware_stream {
         std::atomic<uint64_t> processed_cursor{0};
 
         // Spin until the next entry appears, then pop and return it.
-        uint64_t consume_next() {
-            uint64_t* ep;
+        QEntry consume_next() {
+            QEntry* ep;
             while (!(ep = queue->front())) std::this_thread::yield();
-            uint64_t v = *ep;
+            QEntry v = *ep;
             queue->pop();
             return v;
         }
@@ -74,7 +74,7 @@ namespace retracesoftware_stream {
         }
 
         void consume_and_write_value() {
-            uint64_t e = consume_next();
+            QEntry e = consume_next();
             switch (tag_of(e)) {
                 case TAG_OBJECT: {
                     PyObject* obj = as_ptr(e);
@@ -82,12 +82,14 @@ namespace retracesoftware_stream {
                     return_obj(obj);
                     break;
                 }
+#if SIZEOF_VOID_P >= 8
                 case TAG_PICKLED: {
                     PyObject* obj = as_ptr(e);
                     try { stream->write_pre_pickled(obj); } catch (...) { PyErr_Clear(); }
                     return_obj(obj);
                     break;
                 }
+#endif
                 case TAG_COMMAND:
                     switch (cmd_of(e)) {
                         case CMD_LIST: {
@@ -111,6 +113,12 @@ namespace retracesoftware_stream {
                             }
                             break;
                         }
+                        case CMD_PICKLED: {
+                            PyObject* obj = consume_ptr();
+                            try { stream->write_pre_pickled(obj); } catch (...) { PyErr_Clear(); }
+                            return_obj(obj);
+                            break;
+                        }
                         default: break;
                     }
                     break;
@@ -120,7 +128,7 @@ namespace retracesoftware_stream {
 
         static void writer_loop(AsyncFilePersister* self) {
             while (true) {
-                uint64_t* ep;
+                QEntry* ep;
                 while (!(ep = self->queue->front())) {
                     if (self->shutdown_flag.load(std::memory_order_acquire)) return;
                     std::this_thread::yield();
@@ -129,7 +137,7 @@ namespace retracesoftware_stream {
                 PyGILState_STATE gstate = PyGILState_Ensure();
 
                 while ((ep = self->queue->front())) {
-                    uint64_t e = *ep;
+                    QEntry e = *ep;
                     self->queue->pop();
 
                     switch (tag_of(e)) {
@@ -139,6 +147,7 @@ namespace retracesoftware_stream {
                             self->return_obj(obj);
                             break;
                         }
+#if SIZEOF_VOID_P >= 8
                         case TAG_PICKLED: {
                             PyObject* obj = as_ptr(e);
                             try { self->stream->write_pre_pickled(obj); } catch (...) { PyErr_Clear(); }
@@ -163,6 +172,7 @@ namespace retracesoftware_stream {
                             self->return_obj(obj);
                             break;
                         }
+#endif
                         case TAG_DELETE: {
                             try { self->stream->object_freed(as_ptr(e)); } catch (...) { PyErr_Clear(); }
                             break;
@@ -228,6 +238,30 @@ namespace retracesoftware_stream {
                                     try { self->stream->write_control(Heartbeat); } catch (...) { PyErr_Clear(); }
                                     self->consume_and_write_value();
                                     break;
+                                case CMD_PICKLED: {
+                                    PyObject* obj = self->consume_ptr();
+                                    try { self->stream->write_pre_pickled(obj); } catch (...) { PyErr_Clear(); }
+                                    self->return_obj(obj);
+                                    break;
+                                }
+                                case CMD_NEW_HANDLE: {
+                                    PyObject* obj = self->consume_ptr();
+                                    try { self->stream->write_new_handle(obj); } catch (...) { PyErr_Clear(); }
+                                    self->return_obj(obj);
+                                    break;
+                                }
+                                case CMD_BIND: {
+                                    PyObject* obj = self->consume_ptr();
+                                    try { self->stream->bind(obj, false); } catch (...) { PyErr_Clear(); }
+                                    self->return_obj(obj);
+                                    break;
+                                }
+                                case CMD_EXT_BIND: {
+                                    PyObject* obj = self->consume_ptr();
+                                    try { self->stream->bind(obj, true); } catch (...) { PyErr_Clear(); }
+                                    self->return_obj(obj);
+                                    break;
+                                }
                                 case CMD_SHUTDOWN:
                                     try { self->stream->flush(); } catch (...) { PyErr_Clear(); }
                                     self->processed_cursor.fetch_add(1, std::memory_order_release);
@@ -288,7 +322,7 @@ namespace retracesoftware_stream {
                          PyObject* wkey) {
             if (queue) return {queue, return_queue};
 
-            queue = new rigtorp::SPSCQueue<uint64_t>(queue_capacity);
+            queue = new rigtorp::SPSCQueue<QEntry>(queue_capacity);
             return_queue = new rigtorp::SPSCQueue<PyObject*>(return_queue_capacity);
             total_removed_ptr = total_removed;
             writer_key = wkey;
@@ -309,14 +343,17 @@ namespace retracesoftware_stream {
 
         void drain_value() {
             while (!queue->front()) std::this_thread::yield();
-            uint64_t e = *queue->front();
+            QEntry e = *queue->front();
             queue->pop();
             switch (tag_of(e)) {
                 case TAG_OBJECT:
+#if SIZEOF_VOID_P >= 8
                 case TAG_PICKLED:
                 case TAG_NEW_HANDLE:
                 case TAG_BIND:
-                case TAG_EXT_BIND: {
+                case TAG_EXT_BIND:
+#endif
+                {
                     PyObject* obj = as_ptr(e);
                     if (!is_immortal(obj)) Py_DECREF(obj);
                     break;
@@ -333,6 +370,12 @@ namespace retracesoftware_stream {
                         case CMD_HEARTBEAT:
                             drain_value();
                             break;
+                        case CMD_PICKLED:
+                        case CMD_NEW_HANDLE:
+                        case CMD_BIND:
+                        case CMD_EXT_BIND:
+                            drain_value();
+                            break;
                         default: break;
                     }
                     break;
@@ -343,14 +386,17 @@ namespace retracesoftware_stream {
         void drain_queue_entries() {
             if (!queue) return;
             while (auto* ep = queue->front()) {
-                uint64_t e = *ep;
+                QEntry e = *ep;
                 queue->pop();
                 switch (tag_of(e)) {
                     case TAG_OBJECT:
+#if SIZEOF_VOID_P >= 8
                     case TAG_PICKLED:
                     case TAG_NEW_HANDLE:
                     case TAG_BIND:
-                    case TAG_EXT_BIND: {
+                    case TAG_EXT_BIND:
+#endif
+                    {
                         PyObject* obj = as_ptr(e);
                         if (!is_immortal(obj)) Py_DECREF(obj);
                         break;
@@ -368,6 +414,12 @@ namespace retracesoftware_stream {
                                 for (uint32_t i = 0, n = len_of(e) * 2; i < n; i++) drain_value();
                                 break;
                             case CMD_HEARTBEAT:
+                                drain_value();
+                                break;
+                            case CMD_PICKLED:
+                            case CMD_NEW_HANDLE:
+                            case CMD_BIND:
+                            case CMD_EXT_BIND:
                                 drain_value();
                                 break;
                             default: break;

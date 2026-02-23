@@ -329,7 +329,7 @@ namespace retracesoftware_stream {
         }
 
         void write_pointer(void * ptr) {
-            write(*(uint64_t *)&ptr);
+            write((uint64_t)(uintptr_t)ptr);
         }
 
         void write_tuple_header(size_t size) {

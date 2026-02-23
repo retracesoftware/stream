@@ -10,48 +10,79 @@
 
 namespace retracesoftware_stream {
 
-    // Tagged uint64_t queue protocol (3-bit tag, 64-bit arch).
+    // Tagged word-sized queue protocol.
     //
-    // On 64-bit platforms PyObject* and PyThreadState* are 8-byte
-    // aligned, leaving the bottom 3 bits free for tagging.
+    // Each queue entry is one machine word (uintptr_t).
     //
-    //   Tag 0b000  TAG_OBJECT   PyObject* (incref'd, persister serializes)
-    //   Tag 0b001  TAG_DELETE   PyObject* identity (no incref, deletion notification)
-    //   Tag 0b010  TAG_THREAD   PyThreadState* (no incref, thread identity stamp)
-    //   Tag 0b011  TAG_COMMAND  non-pointer: bits[3:31] Cmd enum, bits[32:63] payload
-    //   Tag 0b100  TAG_PICKLED     PyObject* (incref'd bytes, persister writes pre-pickled)
-    //   Tag 0b101  TAG_NEW_HANDLE  PyObject* (incref'd, persister registers new handle)
-    //   Tag 0b110  TAG_BIND        PyObject* (incref'd, persister binds type)
-    //   Tag 0b111  TAG_EXT_BIND    PyObject* (incref'd, persister binds external type)
+    // 64-bit: 3-bit tag in low bits (8-byte aligned pointers).
+    //   Tag 0b000  TAG_OBJECT      PyObject* (incref'd, persister serializes)
+    //   Tag 0b001  TAG_DELETE      PyObject* identity (no incref, deletion notification)
+    //   Tag 0b010  TAG_THREAD      PyThreadState* (no incref, thread identity stamp)
+    //   Tag 0b011  TAG_PICKLED     PyObject* (incref'd bytes, persister writes pre-pickled)
+    //   Tag 0b100  TAG_NEW_HANDLE  PyObject* (incref'd, persister registers new handle)
+    //   Tag 0b101  TAG_BIND        PyObject* (incref'd, persister binds type)
+    //   Tag 0b110  TAG_EXT_BIND    PyObject* (incref'd, persister binds external type)
+    //   Tag 0b111  TAG_COMMAND     non-pointer: [len:32][cmd:29][tag:3]
+    //
+    // 32-bit: 2-bit tag in low bits (4-byte aligned pointers).
+    //   Tag 0b00   TAG_OBJECT      PyObject*
+    //   Tag 0b01   TAG_DELETE      PyObject* identity
+    //   Tag 0b10   TAG_THREAD      PyThreadState*
+    //   Tag 0b11   TAG_COMMAND     non-pointer: [len:26][cmd:4][tag:2]
+    //   PICKLED, NEW_HANDLE, BIND, EXT_BIND are encoded as
+    //   CMD_* entries followed by an obj_entry pointer.
 
-    static constexpr uint64_t TAG_MASK    = 0x7;
-    static constexpr uint64_t TAG_OBJECT  = 0;
-    static constexpr uint64_t TAG_DELETE  = 1;
-    static constexpr uint64_t TAG_THREAD  = 2;
-    static constexpr uint64_t TAG_PICKLED    = 3;
-    static constexpr uint64_t TAG_NEW_HANDLE = 4;
-    static constexpr uint64_t TAG_BIND       = 5;
-    static constexpr uint64_t TAG_EXT_BIND   = 6;
-    static constexpr uint64_t TAG_COMMAND = 7;
+    using QEntry = uintptr_t;
 
-    inline uint64_t tag_of(uint64_t e)          { return e & TAG_MASK; }
-    inline PyObject* as_ptr(uint64_t e)         { return (PyObject*)(e & ~TAG_MASK); }
-    inline PyThreadState* as_tstate(uint64_t e) { return (PyThreadState*)(e & ~TAG_MASK); }
+#if SIZEOF_VOID_P >= 8
+    static constexpr QEntry TAG_MASK       = 0x7;
+    static constexpr QEntry TAG_OBJECT     = 0;
+    static constexpr QEntry TAG_DELETE     = 1;
+    static constexpr QEntry TAG_THREAD     = 2;
+    static constexpr QEntry TAG_PICKLED    = 3;
+    static constexpr QEntry TAG_NEW_HANDLE = 4;
+    static constexpr QEntry TAG_BIND       = 5;
+    static constexpr QEntry TAG_EXT_BIND   = 6;
+    static constexpr QEntry TAG_COMMAND    = 7;
 
-    inline uint64_t obj_entry(PyObject* p)         { return (uint64_t)(uintptr_t)p; }
-    inline uint64_t delete_entry(PyObject* p)      { return (uint64_t)(uintptr_t)p | TAG_DELETE; }
-    inline uint64_t thread_entry(PyThreadState* t) { return (uint64_t)(uintptr_t)t | TAG_THREAD; }
-    inline uint64_t pickled_entry(PyObject* p)      { return (uint64_t)(uintptr_t)p | TAG_PICKLED; }
-    inline uint64_t new_handle_entry(PyObject* p)  { return (uint64_t)(uintptr_t)p | TAG_NEW_HANDLE; }
-    inline uint64_t bind_entry(PyObject* p)        { return (uint64_t)(uintptr_t)p | TAG_BIND; }
-    inline uint64_t ext_bind_entry(PyObject* p)    { return (uint64_t)(uintptr_t)p | TAG_EXT_BIND; }
+    static constexpr int CMD_SHIFT = 3;
+    static constexpr int CMD_BITS  = 29;
+    static constexpr int LEN_SHIFT = 32;
+#elif SIZEOF_VOID_P == 4
+    static constexpr QEntry TAG_MASK    = 0x3;
+    static constexpr QEntry TAG_OBJECT  = 0;
+    static constexpr QEntry TAG_DELETE  = 1;
+    static constexpr QEntry TAG_THREAD  = 2;
+    static constexpr QEntry TAG_COMMAND = 3;
 
-    inline uint64_t cmd_entry(uint32_t cmd, uint32_t len = 0) {
-        return ((uint64_t)len << 32) | ((uint64_t)cmd << 3) | TAG_COMMAND;
+    static constexpr int CMD_SHIFT = 2;
+    static constexpr int CMD_BITS  = 4;
+    static constexpr int LEN_SHIFT = 6;
+#else
+    #error "Unsupported pointer size"
+#endif
+
+    inline QEntry tag_of(QEntry e)              { return e & TAG_MASK; }
+    inline PyObject* as_ptr(QEntry e)           { return (PyObject*)(e & ~TAG_MASK); }
+    inline PyThreadState* as_tstate(QEntry e)   { return (PyThreadState*)(e & ~TAG_MASK); }
+
+    inline QEntry obj_entry(PyObject* p)            { return (QEntry)p; }
+    inline QEntry delete_entry(PyObject* p)         { return (QEntry)p | TAG_DELETE; }
+    inline QEntry thread_entry(PyThreadState* t)    { return (QEntry)t | TAG_THREAD; }
+
+#if SIZEOF_VOID_P >= 8
+    inline QEntry pickled_entry(PyObject* p)        { return (QEntry)p | TAG_PICKLED; }
+    inline QEntry new_handle_entry(PyObject* p)     { return (QEntry)p | TAG_NEW_HANDLE; }
+    inline QEntry bind_entry(PyObject* p)           { return (QEntry)p | TAG_BIND; }
+    inline QEntry ext_bind_entry(PyObject* p)       { return (QEntry)p | TAG_EXT_BIND; }
+#endif
+
+    inline QEntry cmd_entry(uint32_t cmd, uint32_t len = 0) {
+        return ((QEntry)len << LEN_SHIFT) | ((QEntry)cmd << CMD_SHIFT) | TAG_COMMAND;
     }
 
-    inline uint32_t cmd_of(uint64_t e) { return (uint32_t)((e >> 3) & 0x1FFFFFFFU); }
-    inline uint32_t len_of(uint64_t e) { return (uint32_t)(e >> 32); }
+    inline uint32_t cmd_of(QEntry e) { return (uint32_t)((e >> CMD_SHIFT) & ((1U << CMD_BITS) - 1)); }
+    inline uint32_t len_of(QEntry e) { return (uint32_t)(e >> LEN_SHIFT); }
 
     inline int64_t estimate_long_size(PyObject* obj) {
         return 28;
@@ -101,6 +132,11 @@ namespace retracesoftware_stream {
         CMD_TUPLE,
         CMD_DICT,
         CMD_HEARTBEAT,
+
+        CMD_PICKLED,
+        CMD_NEW_HANDLE,
+        CMD_BIND,
+        CMD_EXT_BIND,
     };
 
 }
