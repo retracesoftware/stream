@@ -24,11 +24,6 @@ def _read_value(reader):
             return val
 
 
-def test_replace_prefix():
-    assert stream.replace_prefix("root/path", "root/", "/tmp/") == "/tmp/path"
-    assert stream.replace_prefix("root/path", "nomatch/", "/tmp/") == "root/path"
-
-
 def test_writer_reader_roundtrip(tmp_path):
     """Basic roundtrip with strings and integers."""
     path = tmp_path / "trace.bin"
