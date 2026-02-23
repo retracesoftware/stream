@@ -189,10 +189,10 @@ def test_inflight_bytes_tracks_data(tmp_path):
     import time
     path = tmp_path / "trace.bin"
     with stream.writer(path, thread=_thread_id) as w:
-        assert w.inflight_bytes == 0
+        baseline = w.inflight_bytes
         big = b"X" * 10000
         w(big)
-        assert w.inflight_bytes > 0
+        assert w.inflight_bytes > baseline
         w.flush()
         time.sleep(0.2)
         assert w.inflight_bytes < 1000

@@ -25,7 +25,7 @@ def _thread_id() -> str:
 def _read_value(reader):
     while True:
         val = reader()
-        if not isinstance(val, (stream.Bind, stream.ThreadSwitch)):
+        if not isinstance(val, stream.Control):
             return val
 
 

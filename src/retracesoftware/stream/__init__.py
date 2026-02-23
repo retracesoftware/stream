@@ -193,9 +193,9 @@ class writer(_backend_mod.ObjectWriter):
 
     def __exit__(self, *args):
         self.flush()
+        self.disable()
         if hasattr(self, '_output') and self._output and hasattr(self._output, 'close'):
             self._output.close()
-        self.output = None
         self._output = None
 
     def serialize(self, obj):

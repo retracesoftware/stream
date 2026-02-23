@@ -67,6 +67,7 @@ namespace retracesoftware_stream {
         }
 
         void return_obj(PyObject* obj) {
+            if (is_immortal(obj)) return;
             if (!return_queue->try_push(obj)) {
                 Py_DECREF(obj);
             }
@@ -78,6 +79,12 @@ namespace retracesoftware_stream {
                 case TAG_OBJECT: {
                     PyObject* obj = as_ptr(e);
                     try { stream->write(obj); } catch (...) { PyErr_Clear(); }
+                    return_obj(obj);
+                    break;
+                }
+                case TAG_PICKLED: {
+                    PyObject* obj = as_ptr(e);
+                    try { stream->write_pre_pickled(obj); } catch (...) { PyErr_Clear(); }
                     return_obj(obj);
                     break;
                 }
@@ -102,12 +109,6 @@ namespace retracesoftware_stream {
                                 consume_and_write_value();
                                 consume_and_write_value();
                             }
-                            break;
-                        }
-                        case CMD_PICKLED: {
-                            PyObject* bytes_obj = consume_ptr();
-                            try { stream->write_pre_pickled(bytes_obj); } catch (...) { PyErr_Clear(); }
-                            return_obj(bytes_obj);
                             break;
                         }
                         default: break;
@@ -138,6 +139,30 @@ namespace retracesoftware_stream {
                             self->return_obj(obj);
                             break;
                         }
+                        case TAG_PICKLED: {
+                            PyObject* obj = as_ptr(e);
+                            try { self->stream->write_pre_pickled(obj); } catch (...) { PyErr_Clear(); }
+                            self->return_obj(obj);
+                            break;
+                        }
+                        case TAG_NEW_HANDLE: {
+                            PyObject* obj = as_ptr(e);
+                            try { self->stream->write_new_handle(obj); } catch (...) { PyErr_Clear(); }
+                            self->return_obj(obj);
+                            break;
+                        }
+                        case TAG_BIND: {
+                            PyObject* obj = as_ptr(e);
+                            try { self->stream->bind(obj, false); } catch (...) { PyErr_Clear(); }
+                            self->return_obj(obj);
+                            break;
+                        }
+                        case TAG_EXT_BIND: {
+                            PyObject* obj = as_ptr(e);
+                            try { self->stream->bind(obj, true); } catch (...) { PyErr_Clear(); }
+                            self->return_obj(obj);
+                            break;
+                        }
                         case TAG_DELETE: {
                             try { self->stream->object_freed(as_ptr(e)); } catch (...) { PyErr_Clear(); }
                             break;
@@ -152,7 +177,9 @@ namespace retracesoftware_stream {
                                 if (it != cache.end()) {
                                     handle = it->second;
                                 } else {
-                                    handle = PyDict_GetItem(tstate->dict, self->writer_key);
+                                    handle = tstate->dict
+                                        ? PyDict_GetItem(tstate->dict, self->writer_key)
+                                        : nullptr;
                                     if (handle) {
                                         Py_INCREF(handle);
                                         cache[tstate] = handle;
@@ -167,26 +194,6 @@ namespace retracesoftware_stream {
                         }
                         case TAG_COMMAND: {
                             switch (cmd_of(e)) {
-                                case CMD_BIND: {
-                                    PyObject* obj = self->consume_ptr();
-                                    try { self->stream->bind(obj, false); } catch (...) { PyErr_Clear(); }
-                                    self->return_obj(obj);
-                                    break;
-                                }
-                                case CMD_EXT_BIND: {
-                                    PyObject* obj  = self->consume_ptr();
-                                    PyObject* type = self->consume_ptr();
-                                    try { self->stream->bind(obj, true); } catch (...) { PyErr_Clear(); }
-                                    self->return_obj(obj);
-                                    self->return_obj(type);
-                                    break;
-                                }
-                                case CMD_NEW_HANDLE: {
-                                    PyObject* obj = self->consume_ptr();
-                                    try { self->stream->write_new_handle(obj); } catch (...) { PyErr_Clear(); }
-                                    self->return_obj(obj);
-                                    break;
-                                }
                                 case CMD_HANDLE_REF:
                                     try { self->stream->write_handle_ref_by_index(len_of(e)); } catch (...) { PyErr_Clear(); }
                                     break;
@@ -196,12 +203,6 @@ namespace retracesoftware_stream {
                                 case CMD_FLUSH:
                                     try { self->stream->flush(); } catch (...) { PyErr_Clear(); }
                                     break;
-                                case CMD_PICKLED: {
-                                    PyObject* bytes_obj = self->consume_ptr();
-                                    try { self->stream->write_pre_pickled(bytes_obj); } catch (...) { PyErr_Clear(); }
-                                    self->return_obj(bytes_obj);
-                                    break;
-                                }
                                 case CMD_LIST: {
                                     uint32_t n = len_of(e);
                                     try { self->stream->write_list_header(n); } catch (...) { PyErr_Clear(); }
@@ -312,8 +313,14 @@ namespace retracesoftware_stream {
             queue->pop();
             switch (tag_of(e)) {
                 case TAG_OBJECT:
-                    Py_DECREF(as_ptr(e));
+                case TAG_PICKLED:
+                case TAG_NEW_HANDLE:
+                case TAG_BIND:
+                case TAG_EXT_BIND: {
+                    PyObject* obj = as_ptr(e);
+                    if (!is_immortal(obj)) Py_DECREF(obj);
                     break;
+                }
                 case TAG_COMMAND:
                     switch (cmd_of(e)) {
                         case CMD_LIST:
@@ -322,11 +329,6 @@ namespace retracesoftware_stream {
                             break;
                         case CMD_DICT:
                             for (uint32_t i = 0, n = len_of(e) * 2; i < n; i++) drain_value();
-                            break;
-                        case CMD_PICKLED:
-                            while (!queue->front()) std::this_thread::yield();
-                            Py_DECREF(as_ptr(*queue->front()));
-                            queue->pop();
                             break;
                         case CMD_HEARTBEAT:
                             drain_value();
@@ -345,31 +347,19 @@ namespace retracesoftware_stream {
                 queue->pop();
                 switch (tag_of(e)) {
                     case TAG_OBJECT:
-                        Py_DECREF(as_ptr(e));
+                    case TAG_PICKLED:
+                    case TAG_NEW_HANDLE:
+                    case TAG_BIND:
+                    case TAG_EXT_BIND: {
+                        PyObject* obj = as_ptr(e);
+                        if (!is_immortal(obj)) Py_DECREF(obj);
                         break;
+                    }
                     case TAG_DELETE:
                     case TAG_THREAD:
                         break;
                     case TAG_COMMAND:
                         switch (cmd_of(e)) {
-                            case CMD_BIND:
-                            case CMD_NEW_HANDLE:
-                                while (!queue->front()) std::this_thread::yield();
-                                Py_DECREF(as_ptr(*queue->front()));
-                                queue->pop();
-                                break;
-                            case CMD_EXT_BIND:
-                                for (int i = 0; i < 2; i++) {
-                                    while (!queue->front()) std::this_thread::yield();
-                                    Py_DECREF(as_ptr(*queue->front()));
-                                    queue->pop();
-                                }
-                                break;
-                            case CMD_PICKLED:
-                                while (!queue->front()) std::this_thread::yield();
-                                Py_DECREF(as_ptr(*queue->front()));
-                                queue->pop();
-                                break;
                             case CMD_LIST:
                             case CMD_TUPLE:
                                 for (uint32_t i = 0, n = len_of(e); i < n; i++) drain_value();

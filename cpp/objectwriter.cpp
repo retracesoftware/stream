@@ -87,15 +87,12 @@ namespace retracesoftware_stream {
     }
 
     static inline int64_t native_estimate(PyObject* obj) {
-        if (obj == Py_None) return 0;
-        
         PyTypeObject* tp = Py_TYPE(obj);
         if (tp == &PyLong_Type)   return 28;
         if (tp == &PyUnicode_Type)
             return (int64_t)(sizeof(PyObject) + PyUnicode_GET_LENGTH(obj));
         if (tp == &PyBytes_Type)
             return (int64_t)(sizeof(PyObject) + PyBytes_GET_SIZE(obj));
-        if (tp == &PyBool_Type)   return 0;
         if (tp == &StreamHandle_Type) return 64;
         if (is_patched(tp->tp_free)) return 64;
         if (tp == &PyFloat_Type)  return 24;
@@ -232,15 +229,9 @@ namespace retracesoftware_stream {
                 patch_free(Py_TYPE(obj));
             }
 
-            if (ext) {
-                push(cmd_entry(CMD_EXT_BIND));
-                Py_INCREF(obj);  total_added += estimate_size(obj); push(obj_entry(obj));
-                PyObject* type = (PyObject*)Py_TYPE(obj);
-                Py_INCREF(type); total_added += estimate_size(type); push(obj_entry(type));
-            } else {
-                push(cmd_entry(CMD_BIND));
-                Py_INCREF(obj);  total_added += estimate_size(obj); push(obj_entry(obj));
-            }
+            Py_INCREF(obj);
+            total_added += estimate_size(obj);
+            push(ext ? ext_bind_entry(obj) : bind_entry(obj));
             messages_written++;
         }
 
@@ -296,8 +287,7 @@ namespace retracesoftware_stream {
                 Py_DECREF(str);
             }
 
-            push(cmd_entry(CMD_NEW_HANDLE));
-            Py_INCREF(obj); total_added += estimate_size(obj); push(obj_entry(obj));
+            Py_INCREF(obj); total_added += estimate_size(obj); push(new_handle_entry(obj));
             messages_written++;
             return stream_handle(next_handle++, verbose ? obj : nullptr);
         }
@@ -316,33 +306,45 @@ namespace retracesoftware_stream {
 
         static constexpr int MAX_FLATTEN_DEPTH = 32;
 
+        void push_obj(PyObject* obj, int64_t size) {
+            wait_for_inflight();
+            total_added += size;
+            Py_INCREF(obj);
+            push(obj_entry(obj));
+        }
+
         void push_value(PyObject* obj, int depth = 0) {
-            int64_t est = native_estimate(obj);
-            if (est >= 0) {
-                Py_INCREF(obj);
-                total_added += est;
-                push(obj_entry(obj));
-                return;
-            }
 
-            PyTypeObject* tp = Py_TYPE(obj);
+            if (is_immortal(obj)) {
+                push(obj_entry(obj));                
+            } else {
+                PyTypeObject* tp = Py_TYPE(obj);
 
-            if (depth < MAX_FLATTEN_DEPTH) {
-                if (tp == &PyList_Type) {
+                if (tp == &PyLong_Type) {
+                    push_obj(obj, estimate_long_size(obj));
+                } else if (tp == &PyUnicode_Type) {
+                    push_obj(obj, estimate_unicode_size(obj));
+                } else if (tp == &PyBytes_Type) {
+                    push_obj(obj, estimate_bytes_size(obj));
+                } else if (tp == &StreamHandle_Type) {
+                    push_obj(obj, estimate_stream_handle_size(obj));
+                } else if (is_patched(tp->tp_free)) {
+                    push_obj(obj, 64);
+                } else if (tp == &PyList_Type) {
+                    assert (depth < MAX_FLATTEN_DEPTH);
                     Py_ssize_t n = PyList_GET_SIZE(obj);
                     push(cmd_entry(CMD_LIST, (uint32_t)n));
                     for (Py_ssize_t i = 0; i < n; i++)
                         push_value(PyList_GET_ITEM(obj, i), depth + 1);
-                    return;
-                }
-                if (tp == &PyTuple_Type) {
+
+                } else if (tp == &PyTuple_Type) {
+                    assert (depth < MAX_FLATTEN_DEPTH);
                     Py_ssize_t n = PyTuple_GET_SIZE(obj);
                     push(cmd_entry(CMD_TUPLE, (uint32_t)n));
                     for (Py_ssize_t i = 0; i < n; i++)
                         push_value(PyTuple_GET_ITEM(obj, i), depth + 1);
-                    return;
-                }
-                if (tp == &PyDict_Type) {
+                } else if (tp == &PyDict_Type) {
+                    assert (depth < MAX_FLATTEN_DEPTH);
                     Py_ssize_t n = PyDict_Size(obj);
                     push(cmd_entry(CMD_DICT, (uint32_t)n));
                     Py_ssize_t pos = 0;
@@ -351,26 +353,24 @@ namespace retracesoftware_stream {
                         push_value(key, depth + 1);
                         push_value(value, depth + 1);
                     }
-                    return;
+                } else if (tp == &PyFloat_Type) {
+                    push_obj(obj, estimate_float_size(obj));
+                } else if (tp == &PyMemoryView_Type) {
+                    push_obj(obj, estimate_memory_view_size(obj));
+                } else {
+                    wait_for_inflight();
+                    PyObject* dumps = pickle_dumps_fn();
+                    PyObject* pickled = dumps ? PyObject_CallOneArg(dumps, obj) : nullptr;
+                    if (pickled) {
+                        total_added += estimate_bytes_size(pickled);
+                        push(pickled_entry(pickled));
+                    } else {
+                        PyErr_Clear();
+                        Py_INCREF(obj);
+                        total_added += estimate_size(obj);
+                        push(obj_entry(obj));
+                    }
                 }
-            } else if (tp == &PyList_Type || tp == &PyTuple_Type || tp == &PyDict_Type) {
-                Py_INCREF(obj);
-                total_added += estimate_size(obj);
-                push(obj_entry(obj));
-                return;
-            }
-
-            PyObject* dumps = pickle_dumps_fn();
-            PyObject* pickled = dumps ? PyObject_CallOneArg(dumps, obj) : nullptr;
-            if (pickled) {
-                push(cmd_entry(CMD_PICKLED));
-                total_added += (int64_t)(sizeof(PyObject) + PyBytes_GET_SIZE(pickled));
-                push(obj_entry(pickled));
-            } else {
-                PyErr_Clear();
-                Py_INCREF(obj);
-                total_added += estimate_size(obj);
-                push(obj_entry(obj));
             }
         }
 
@@ -392,32 +392,28 @@ namespace retracesoftware_stream {
         }
 
         void write_all(StreamHandle * self, PyObject *const * args, size_t nargs) {
+            if (!is_disabled()) {
+                send_thread();
 
-            wait_for_inflight();
-            if (is_disabled()) return;
+                Writing w;
 
-            send_thread();
-
-            Writing w;
-
-            write_root(self);
-            for (size_t i = 0; i < nargs; i++) {
-                write_root(args[i]);
+                write_root(self);
+                for (size_t i = 0; i < nargs; i++) {
+                    write_root(args[i]);
+                }
             }
         }
 
         void write_all(PyObject*const * args, size_t nargs) {
 
-            if (is_disabled()) return;
-            wait_for_inflight();
-            if (is_disabled()) return;
+            if (!is_disabled()) {
+                send_thread();
 
-            send_thread();
+                Writing w;
 
-            Writing w;
-
-            for (size_t i = 0; i < nargs; i++) {
-                write_root(args[i]);
+                for (size_t i = 0; i < nargs; i++) {
+                    write_root(args[i]);
+                }
             }
         }
 
@@ -470,6 +466,12 @@ namespace retracesoftware_stream {
             } catch (...) {
                 return nullptr;
             }
+        }
+
+        static PyObject* py_disable(ObjectWriter* self, PyObject* unused) {
+            self->queue = nullptr;
+            self->return_queue = nullptr;
+            Py_RETURN_NONE;
         }
 
         static PyObject* py_heartbeat(ObjectWriter* self, PyObject* payload) {
@@ -798,6 +800,7 @@ namespace retracesoftware_stream {
     static PyMethodDef methods[] = {
         {"handle", (PyCFunction)ObjectWriter::py_handle, METH_O, "Creates handle"},
         {"flush", (PyCFunction)ObjectWriter::py_flush, METH_NOARGS, "Flush buffered data to the output callback"},
+        {"disable", (PyCFunction)ObjectWriter::py_disable, METH_NOARGS, "Null queue pointers to prevent further writes"},
         {"heartbeat", (PyCFunction)ObjectWriter::py_heartbeat, METH_O, "Push heartbeat payload dict and flush"},
         {"bind", (PyCFunction)ObjectWriter::py_bind, METH_O, "TODO"},
         {"ext_bind", (PyCFunction)ObjectWriter::py_ext_bind, METH_O, "TODO"},

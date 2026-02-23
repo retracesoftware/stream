@@ -20,7 +20,7 @@ def _read_value(reader):
     """Read the next non-control value from reader."""
     while True:
         val = reader()
-        if not isinstance(val, (stream.Bind, stream.ThreadSwitch)):
+        if not isinstance(val, stream.Control):
             return val
 
 
