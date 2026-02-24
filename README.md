@@ -108,24 +108,6 @@ fd. PID-framing (`[pid:4][len:2][payload]`) lets both processes write
 interleaved frames that the reader can demultiplex. Frames are clamped to
 `PIPE_BUF` on FIFOs to guarantee atomic writes.
 
-### Double buffering
-
-`PrimitiveStream` maintains two 64 KB `BufferSlot` objects. Serialization
-fills one slot while the previous slot's `memoryview` is being consumed by
-the output callback. The `BufferSlot` type implements the Python buffer
-protocol and uses `std::atomic<bool> in_use` to coordinate ownership — the
-serializer can detect when the callback has finished with a slot without any
-locks on the hot path.
-
-### AsyncFilePersister (default)
-
-When a `path` is provided, the writer creates a C++ `AsyncFilePersister` as
-the default output callback. It runs a dedicated background thread that drains
-a queue of `memoryview` references using raw POSIX `::write()` syscalls.
-This keeps file I/O off the main thread entirely. The persister acquires an
-exclusive `flock` on the trace file and supports both truncate and append
-modes.
-
 ### Custom output callbacks
 
 Any Python callable accepting a single `memoryview` (or bytes-like) argument
@@ -139,87 +121,15 @@ with writer(output=lambda data: chunks.append(bytes(data)),
     w("hello")
 ```
 
-## Wire format
+## Wire format ([detailed doc](docs/RECORD_PATH.md#wire-format))
 
 Each value is encoded as a control byte followed by payload. The control
 byte's lower 4 bits select the **sized type**; the upper 4 bits encode either
-the **size class** (for sized types) or a **fixed-size type** tag.
-
-### Built-in types (handled directly in C++)
-
-| Wire type | Python type | Encoding |
-|-----------|-------------|----------|
-| `NONE` | `None` | 1 byte (fixed) |
-| `TRUE` / `FALSE` | `bool` | 1 byte (fixed) |
-| `UINT` | `int` (non-negative) | varint |
-| `NEG1` | `int` (-1) | 1 byte (fixed) |
-| `INT64` | `int` (signed, fits i64) | 1 + 8 bytes (fixed) |
-| `BIGINT` | `int` (arbitrary) | length-prefixed bytes |
-| `FLOAT` | `float` | 1 + 8 bytes (fixed) |
-| `STR` | `str` | length-prefixed UTF-8 |
-| `STR_REF` | `str` (interned) | varint reference to earlier string |
-| `BYTES` | `bytes` | length-prefixed raw |
-| `LIST` | `list` | length + recursive write of elements |
-| `TUPLE` | `tuple` | length + recursive write of elements |
-| `DICT` | `dict` | length + recursive write of key/value pairs |
-| `SET` | `set` | length + recursive write of elements |
-| `FROZENSET` | `frozenset` | length + recursive write of elements |
-
-### Identity types (binding system)
-
-| Wire type | Purpose |
-|-----------|---------|
-| `BIND` | Assign the next binding ID to an object allocated inside the sandbox |
-| `EXT_BIND` | Assign the next binding ID to an object returned from external code (followed by a type reference) |
-| `BINDING` | Reference a previously-bound object by its integer ID |
-| `BINDING_DELETE` | Release a binding (object was garbage collected) |
-| `DELETE` | Release a handle |
-
-### Stream-level markers
-
-| Wire type | Purpose |
-|-----------|---------|
-| `HANDLE` | Reference a permanent handle (e.g. a `StubRef`) |
-| `NEW_HANDLE` | Assign the next handle ID |
-| `THREAD_SWITCH` | Mark a switch to a different thread |
-| `STACK` | Stack frame delta |
-| `ADD_FILENAME` | Register a source filename |
-| `CHECKSUM` | Integrity checksum |
-
-### Fallback serialization
-
-| Wire type | Purpose |
-|-----------|---------|
-| `PICKLED` | Length-prefixed pickle bytes (any type not handled above) |
-
-## Serialization dispatch
-
-The C++ `MessageStream::write(obj)` function dispatches by exact type:
-
-```cpp
-if (obj == Py_None)                          → NONE
-else if (type == PyUnicode_Type)             → STR
-else if (type == PyLong_Type)                → UINT / NEG1 / INT64 / BIGINT
-else if (type == PyBytes_Type)               → BYTES
-else if (type == PyBool_Type)                → TRUE / FALSE
-else if (type == PyTuple_Type)               → TUPLE (recursive)
-else if (type == PyList_Type)                → LIST (recursive)
-else if (type == PyDict_Type)                → DICT (recursive)
-else if (bindings.contains(obj))             → BINDING (reference by ID)
-else if (type == PyFloat_Type)               → FLOAT
-else if (type == PyMemoryView_Type)          → MEMORY_VIEW
-else                                         → write_serialized (Python callback)
-```
-
-The **binding check** (line 569 in `writer.h`) is critical: if an object has
-been previously bound (via `bind()` or `ext_bind()`), it is written as a
-single varint `BINDING` reference instead of being re-serialized. This is how
-object identity is preserved across the stream.
-
-The **fallback** `write_serialized` calls the Python `serializer` callback.
-If the callback returns `bytes`, they are written as `PICKLED`. If it returns
-a Python object (e.g. a handle reference), that object is recursively written
-via `write()`.
+the **size class** (for sized types) or a **fixed-size type** tag. All
+built-in Python types (None, bool, int, float, str, bytes, list, tuple,
+dict, set, frozenset) are handled directly in C++. Unknown types fall back
+to pickle. Object identity is preserved via a binding system that assigns
+integer IDs to live objects so they are never serialized twice.
 
 ## The binding system
 
@@ -388,7 +298,6 @@ src/retracesoftware/stream/
 cpp/
 ├── wireformat.h         Wire format constants (SizedTypes, FixedSizeTypes, Control)
 ├── writer.h             Core serialization (PrimitiveStream, MessageStream)
-├── bufferslot.h         BufferSlot — 64 KB double-buffer with atomic in_use flag
 ├── persister.cpp        AsyncFilePersister — background-thread file writer
 ├── stream.h             Shared declarations and type externs
 ├── base.h               Base types and helpers

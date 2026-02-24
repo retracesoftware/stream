@@ -2,7 +2,7 @@
 
 Detailed walkthrough of the record (write) path — from `write_root(obj)` on
 the main thread through serialization and I/O on background threads to bytes
-on disk.
+on disk.  Also covers wire format and serialization dispatch.
 
 ## Three-thread pipeline
 
@@ -197,3 +197,85 @@ writer.__exit__  /  writer.disable()
   → push CMD_SHUTDOWN            # writer thread flushes and exits
   → AsyncFilePersister.close()   # joins threads, drains queues, closes fd
 ```
+
+## Wire format
+
+Each value is encoded as a control byte followed by payload. The control
+byte's lower 4 bits select the **sized type**; the upper 4 bits encode either
+the **size class** (for sized types) or a **fixed-size type** tag.
+
+### Built-in types (handled directly in C++)
+
+| Wire type | Python type | Encoding |
+|-----------|-------------|----------|
+| `NONE` | `None` | 1 byte (fixed) |
+| `TRUE` / `FALSE` | `bool` | 1 byte (fixed) |
+| `UINT` | `int` (non-negative) | varint |
+| `NEG1` | `int` (-1) | 1 byte (fixed) |
+| `INT64` | `int` (signed, fits i64) | 1 + 8 bytes (fixed) |
+| `BIGINT` | `int` (arbitrary) | length-prefixed bytes |
+| `FLOAT` | `float` | 1 + 8 bytes (fixed) |
+| `STR` | `str` | length-prefixed UTF-8 |
+| `STR_REF` | `str` (interned) | varint reference to earlier string |
+| `BYTES` | `bytes` | length-prefixed raw |
+| `LIST` | `list` | length + recursive write of elements |
+| `TUPLE` | `tuple` | length + recursive write of elements |
+| `DICT` | `dict` | length + recursive write of key/value pairs |
+| `SET` | `set` | length + recursive write of elements |
+| `FROZENSET` | `frozenset` | length + recursive write of elements |
+
+### Identity types (binding system)
+
+| Wire type | Purpose |
+|-----------|---------|
+| `BIND` | Assign the next binding ID to an object allocated inside the sandbox |
+| `EXT_BIND` | Assign the next binding ID to an object returned from external code (followed by a type reference) |
+| `BINDING` | Reference a previously-bound object by its integer ID |
+| `BINDING_DELETE` | Release a binding (object was garbage collected) |
+| `DELETE` | Release a handle |
+
+### Stream-level markers
+
+| Wire type | Purpose |
+|-----------|---------|
+| `HANDLE` | Reference a permanent handle (e.g. a `StubRef`) |
+| `NEW_HANDLE` | Assign the next handle ID |
+| `THREAD_SWITCH` | Mark a switch to a different thread |
+| `STACK` | Stack frame delta |
+| `ADD_FILENAME` | Register a source filename |
+| `CHECKSUM` | Integrity checksum |
+
+### Fallback serialization
+
+| Wire type | Purpose |
+|-----------|---------|
+| `PICKLED` | Length-prefixed pickle bytes (any type not handled above) |
+
+## Serialization dispatch
+
+The C++ `MessageStream::write(obj)` function dispatches by exact type:
+
+```cpp
+if (obj == Py_None)                          → NONE
+else if (type == PyUnicode_Type)             → STR
+else if (type == PyLong_Type)                → UINT / NEG1 / INT64 / BIGINT
+else if (type == PyBytes_Type)               → BYTES
+else if (type == PyBool_Type)                → TRUE / FALSE
+else if (type == PyTuple_Type)               → TUPLE (recursive)
+else if (type == PyList_Type)                → LIST (recursive)
+else if (type == PyDict_Type)                → DICT (recursive)
+else if (bindings.contains(obj))             → BINDING (reference by ID)
+else if (type == PyFloat_Type)               → FLOAT
+else if (type == PyMemoryView_Type)          → MEMORY_VIEW
+else                                         → write_serialized (Python callback)
+```
+
+The **binding check** is critical: if an object has been previously bound
+(via `bind()` or `ext_bind()`), it is written as a single varint `BINDING`
+reference instead of being re-serialized. This is how object identity is
+preserved across the stream.
+
+The **fallback** `write_serialized` calls the Python `serializer` callback.
+If the callback returns `bytes`, they are written as `PICKLED`. If it returns
+a Python object (e.g. a handle reference), that object is recursively written
+via `write()`.
