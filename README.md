@@ -137,6 +137,38 @@ fd. PID-framing (`[pid:4][len:2][payload]`) lets both processes write
 interleaved frames that the reader can demultiplex. Frames are clamped to
 `PIPE_BUF` on FIFOs to guarantee atomic writes.
 
+### The GIL and real parallelism
+
+Three threads may seem pointless under the GIL, but the pipeline is
+designed so that each thread holds the GIL only briefly and releases it for
+its most expensive work:
+
+| Thread | GIL held | GIL released |
+|--------|----------|--------------|
+| **Main** | Tag pointer, push to SPSC queue | — (returns to user code immediately) |
+| **Writer** | Read `PyObject` fields during serialization | SPSC spin-wait, `::write(fd)` to disk |
+| **Drain** | `Py_DECREF` in batches (yields every 100 µs) | SPSC spin-wait between batches |
+
+The fd write — typically the slowest operation — happens entirely without
+the GIL inside `PidFramedOutput::write`. The SPSC spin-waits on both
+background threads also run GIL-free. This means the main thread is almost
+never contending for the GIL with recording work.
+
+The drain thread exists specifically because `Py_DECREF` on the last
+reference can trigger `tp_dealloc`, which cascades into arbitrary Python
+destructors, weak reference callbacks, and GC cycles. If this happened on
+the writer thread, a single deallocation could stall serialization for an
+unbounded amount of time. Isolating it on a dedicated thread means the
+writer thread's GIL hold time stays proportional to the serialization work
+itself — reading type pointers, string data, and integer values — which is
+fast and bounded.
+
+The drain thread also batches GIL acquisition: it spins GIL-free until
+objects appear in the return queue, then acquires the GIL and processes the
+entire batch. When deallocation-heavy batches run longer than 100 µs it
+releases and re-acquires the GIL to avoid starving the main thread and the
+writer thread.
+
 ### Custom output callbacks
 
 Any Python callable accepting a single `memoryview` (or bytes-like) argument
