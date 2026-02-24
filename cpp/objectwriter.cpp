@@ -196,6 +196,40 @@ namespace retracesoftware_stream {
             printf("Retrace(%i) - ObjectWriter[%lu] -- ", ::pid(), messages_written);
         }
 
+        // Avoid re-entrant repr() on complex proxied objects in verbose mode.
+        const char* debugstr(PyObject* obj) {
+            static thread_local char buffer[256];
+            if (!obj) {
+                return "<null>";
+            }
+
+            PyTypeObject* tp = Py_TYPE(obj);
+            bool scalar =
+                obj == Py_None ||
+                tp == &PyBool_Type ||
+                tp == &PyLong_Type ||
+                tp == &PyFloat_Type ||
+                tp == &PyUnicode_Type ||
+                tp == &PyBytes_Type;
+
+            if (scalar) {
+                PyObject* s = PyObject_Str(obj);
+                if (s) {
+                    const char* utf8 = PyUnicode_AsUTF8(s);
+                    if (utf8) {
+                        PyOS_snprintf(buffer, sizeof(buffer), "%s", utf8);
+                        Py_DECREF(s);
+                        return buffer;
+                    }
+                    Py_DECREF(s);
+                }
+                PyErr_Clear();
+            }
+
+            PyOS_snprintf(buffer, sizeof(buffer), "<%s at %p>", tp->tp_name, obj);
+            return buffer;
+        }
+
         static PyObject * StreamHandle_vectorcall(StreamHandle * self, PyObject *const * args, size_t nargsf, PyObject* kwnames) {
             
             ObjectWriter * writer = reinterpret_cast<ObjectWriter *>(self->writer);
@@ -223,10 +257,6 @@ namespace retracesoftware_stream {
                 debug_prefix();
                 const char * type = ext ? "EXT_BIND" : "BIND";
                 printf("%s(%s)\n", type, Py_TYPE(obj)->tp_name);
-            }
-
-            if (!is_patched(Py_TYPE(obj)->tp_free)) {
-                patch_free(Py_TYPE(obj));
             }
 
             Py_INCREF(obj);
@@ -287,9 +317,7 @@ namespace retracesoftware_stream {
 
             if (verbose) {
                 debug_prefix();
-                PyObject * str = PyObject_Str(obj);
-                printf("NEW_HANDLE(%s)\n", PyUnicode_AsUTF8(str));
-                Py_DECREF(str);
+                printf("NEW_HANDLE(%s)\n", debugstr(obj));
             }
 
             Py_INCREF(obj); total_added += estimate_size(obj);
@@ -306,9 +334,7 @@ namespace retracesoftware_stream {
         void write_root(StreamHandle * obj) {
             if (verbose) {
                 debug_prefix();
-                PyObject * str = PyObject_Str(obj->object);
-                printf("HANDLE_REF(%s)\n", PyUnicode_AsUTF8(str));
-                Py_DECREF(str);
+                printf("HANDLE_REF(%s)\n", debugstr(obj->object));
             }
 
             push(cmd_entry(CMD_HANDLE_REF, obj->index));
@@ -393,9 +419,7 @@ namespace retracesoftware_stream {
         void write_root(PyObject * obj) {
             if (verbose) {
                 debug_prefix();
-                PyObject * str = PyObject_Str(obj);
-                printf("%s\n", PyUnicode_AsUTF8(str));
-                Py_DECREF(str);
+                printf("%s\n", debugstr(obj));
             }
 
             push_value(obj);
@@ -779,9 +803,49 @@ namespace retracesoftware_stream {
         }
     }
 
+    static map<PyTypeObject *, freefunc> freefuncs;
+
     void on_free(void * obj) {
         for (ObjectWriter * writer : writers) {
             writer->object_freed((PyObject *)obj);
+        }
+    }
+
+    void generic_free(void * obj) {
+        auto it = freefuncs.find(Py_TYPE(obj));
+        if (it != freefuncs.end()) {
+            on_free(obj);
+            it->second(obj);
+        } else {
+            // bad situation, a memory leak! Maybe print a bad warning
+        }
+    }
+
+    void PyObject_GC_Del_Wrapper(void * obj) {
+        on_free(obj);
+        PyObject_GC_Del(obj);
+    }
+
+    void PyObject_Free_Wrapper(void * obj) {
+        on_free(obj);
+        PyObject_Free(obj);
+    }
+
+    bool is_patched(freefunc func) {
+        return func == generic_free ||
+               func == PyObject_GC_Del_Wrapper ||
+               func == PyObject_Free_Wrapper;
+    }
+
+    void patch_free(PyTypeObject * cls) {
+        assert(!is_patched(cls->tp_free));
+        if (cls->tp_free == PyObject_Free) {
+            cls->tp_free = PyObject_Free_Wrapper;
+        } else if (cls->tp_free == PyObject_GC_Del) {
+            cls->tp_free = PyObject_GC_Del_Wrapper;
+        } else {
+            freefuncs[cls] = cls->tp_free;
+            cls->tp_free = generic_free;
         }
     }
 

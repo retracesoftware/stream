@@ -369,47 +369,12 @@ namespace retracesoftware_stream {
         }
     };
 
-    static map<PyTypeObject *, freefunc> freefuncs;
-
     void on_free(void * obj);
-
-    static void generic_free(void * obj) {
-        auto it = freefuncs.find(Py_TYPE(obj));
-        if (it != freefuncs.end()) {
-            on_free(obj);
-            it->second(obj);
-        } else {
-            // bad situation, a memory leak! Maybe print a bad warning
-        }
-    }
-
-    static void PyObject_GC_Del_Wrapper(void * obj) {
-        on_free(obj);
-        PyObject_GC_Del(obj);
-    }
-
-    static void PyObject_Free_Wrapper(void * obj) {
-        on_free(obj);
-        PyObject_Free(obj);
-    }
-
-    static bool is_patched(freefunc func) {
-        return func == generic_free || 
-               func == PyObject_GC_Del_Wrapper ||
-               func == PyObject_Free_Wrapper;
-    }
-
-    static void patch_free(PyTypeObject * cls) {
-        assert(!is_patched(cls->tp_free));
-        if (cls->tp_free == PyObject_Free) {
-            cls->tp_free = PyObject_Free_Wrapper;
-        } else if (cls->tp_free == PyObject_GC_Del) {
-            cls->tp_free = PyObject_GC_Del_Wrapper;
-        } else {
-            freefuncs[cls] = cls->tp_free;
-            cls->tp_free = generic_free;
-        }
-    }
+    void generic_free(void * obj);
+    void PyObject_GC_Del_Wrapper(void * obj);
+    void PyObject_Free_Wrapper(void * obj);
+    bool is_patched(freefunc func);
+    void patch_free(PyTypeObject * cls);
 
     class MessageStream {
         PrimitiveStream stream;
@@ -634,9 +599,6 @@ namespace retracesoftware_stream {
                 throw nullptr;
             }
 
-            if (!is_patched(Py_TYPE(obj)->tp_free)) {
-                patch_free(Py_TYPE(obj));
-            }
             bindings[obj] = binding_counter++;
 
             if (ext) {
