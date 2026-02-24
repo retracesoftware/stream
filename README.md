@@ -31,11 +31,40 @@ with reader("trace.bin", read_timeout=5, verbose=False) as r:
     assert r.read() == [1, 2, 3]
 ```
 
+## Design goals
+
+1. **Near-zero main-thread overhead.** The instrumented application should
+   not pay for serialization or I/O. Recording on the hot path must be a
+   bounded, predictable cost — ideally just a pointer push into a lock-free
+   queue.
+
+2. **No locks on the hot path.** Contention between the recording thread and
+   the persistence thread is unacceptable. All coordination uses lock-free
+   SPSC queues and atomics.
+
+3. **Graceful degradation.** If the persistence layer falls behind, the
+   writer applies backpressure based on estimated in-flight bytes. If the
+   timeout expires, recording disables itself rather than blocking the
+   application.
+
+4. **Fork safety.** After `fork()`, parent and child must both be able to
+   continue recording without corrupting the trace. PID-framed output and
+   drain/resume lifecycle hooks make this possible.
+
+5. **Pluggable output.** The serialization layer produces byte buffers; where
+   those bytes go (file, pipe, socket, memory, network) is a separate
+   concern decided by a callback.
+
+6. **Identity, not state.** For objects whose methods are already
+   intercepted (patched types, proxies), the stream only needs to track
+   identity via compact integer bindings — not serialize their internal
+   state.
+
 ## Architecture
 
-Serialization and persistence are **decoupled**. The C++ serialization layer
+Serialization and persistence are **decoupled** per goal 5. The C++ layer
 produces byte buffers; a pluggable output callback decides where those bytes
-go (file, memory, network, etc.).
+go.
 
 ```
   write_root(obj)                         read()
@@ -120,16 +149,6 @@ with writer(output=lambda data: chunks.append(bytes(data)),
             thread=lambda: "main") as w:
     w("hello")
 ```
-
-## Wire format ([detailed doc](docs/RECORD_PATH.md#wire-format))
-
-Each value is encoded as a control byte followed by payload. The control
-byte's lower 4 bits select the **sized type**; the upper 4 bits encode either
-the **size class** (for sized types) or a **fixed-size type** tag. All
-built-in Python types (None, bool, int, float, str, bytes, list, tuple,
-dict, set, frozenset) are handled directly in C++. Unknown types fall back
-to pickle. Object identity is preserved via a binding system that assigns
-integer IDs to live objects so they are never serialized twice.
 
 ## The binding system
 
