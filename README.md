@@ -38,39 +38,75 @@ produces byte buffers; a pluggable output callback decides where those bytes
 go (file, memory, network, etc.).
 
 ```
-                         write_root(obj)
-┌─────────────┐  ─────────────────────────▶ ┌──────────────────┐
-│   Python    │                              │  C++ writer.h    │
-│   writer    │   type_serializer[type(obj)] │  MessageStream   │
-│  serialize()│ ◀───── fallback ──────────── │  ::write(obj)    │
-└─────────────┘                              └────────┬─────────┘
-                                                      │ flush()
-                                             ┌────────▼─────────┐
-                                             │  PrimitiveStream  │
-                                             │  double-buffered  │
-                                             │  64 KB BufferSlots│
-                                             └────────┬─────────┘
-                                                      │ memoryview
-                                             ┌────────▼─────────┐
-                                             │  output callback  │
-                                             │  (any callable)   │
-                                             └────────┬─────────┘
-                                                      │
-                          ┌───────────────────────────┼───────────────────────┐
-                          │                           │                       │
-                 ┌────────▼────────┐       ┌─────────▼────────┐   ┌──────────▼─────────┐
-                 │AsyncFilePersister│       │ Python callable  │   │  FileOutput        │
-                 │ (C++ bg thread) │       │ (in-memory, etc.)│   │  (sync fallback)   │
-                 │  raw ::write()  │       │                  │   │                    │
-                 └─────────────────┘       └──────────────────┘   └────────────────────┘
-
-                                                      │
-┌─────────────┐       read()              ┌───────────▼────────┐
-│   Python    │ ◀──────────────────────── │  C++ objectstream   │
-│   reader    │   type_deserializer[type] │  ObjectStreamReader │
-│ deserialize()│ ◀───── PICKLED ───────── │  ::read()           │
-└─────────────┘                           └────────────────────┘
+  write_root(obj)                         read()
+        │                                   ▲
+        ▼                                   │
+  ObjectWriter ──SPSC──▶ AsyncFile  ──▶  ObjectStreamReader
+  (main thread)  queue   Persister       (consumer)
+                        (writer thread)
+                            │
+                        SPSC return
+                          queue
+                            │
+                        drain thread
+                        (Py_DECREF)
 ```
+
+### Record path ([detailed doc](docs/RECORD_PATH.md))
+
+The record path is a three-thread pipeline: main thread, writer thread,
+and drain thread, connected by two lock-free SPSC queues.
+
+**Why three threads?** The fundamental constraint is that recording must add
+near-zero latency to the instrumented application. Every nanosecond spent
+serializing or writing to disk on the main thread is latency the user's
+program pays. The design pushes all serialization and I/O off the main
+thread — the hot path is just tagging a pointer and pushing it into a
+lock-free queue.
+
+**Why not serialize on the main thread?** Serialization requires calling
+`MessageStream::write`, which does type dispatch, string interning, binding
+lookups, and varint encoding. Even though it's C++, it's substantial work
+per object. More critically, the Python `serializer` fallback can run
+arbitrary Python code. Keeping this on a separate thread means the main
+thread's cost is bounded and predictable.
+
+**Why a separate drain thread?** After the writer thread serializes an
+object, the reference must be released. But `Py_DECREF` on the last
+reference triggers `tp_dealloc`, which can cascade into arbitrary Python
+destructors and GC. Running that on the writer thread would unpredictably
+stall serialization. A dedicated drain thread isolates deallocation from
+both the main thread and the writer thread.
+
+**Why SPSC queues?** Single-producer single-consumer queues are the fastest
+possible inter-thread primitive — no locks, no atomics on the hot path
+(just a compare against a cached head/tail). The recording is inherently
+single-producer (one main thread) and single-consumer (one writer thread).
+
+**Why tagged pointers?** Each queue entry is a single `uintptr_t`. The low
+3 bits of aligned `PyObject*` pointers are always zero, so they're used to
+encode the entry type (object, delete, thread switch, bind, etc.) — no
+separate type field, no struct overhead, and the queue entry fits in a
+single cache line transfer.
+
+**Why flatten containers on the main thread?** Lists, tuples, and dicts are
+pushed element-by-element rather than as a single container pointer. This
+means the writer thread never holds a reference to the container — only to
+the leaf objects. This is safer (the container can be mutated after the push)
+and lets the writer thread process elements as they arrive without needing
+to re-traverse.
+
+**Why backpressure by estimated bytes?** The SPSC queue has a fixed entry
+count, but entries vary wildly in "weight" — a 1 MB string and a small int
+are both one entry. Tracking estimated in-flight bytes (incremented on push,
+decremented on drain) gives a meaningful memory bound. If the writer falls
+behind, the main thread spins briefly; if the timeout expires, recording
+disables itself rather than blocking the application.
+
+**Why PID-framed output?** After `fork()`, parent and child share the same
+fd. PID-framing (`[pid:4][len:2][payload]`) lets both processes write
+interleaved frames that the reader can demultiplex. Frames are clamped to
+`PIPE_BUF` on FIFOs to guarantee atomic writes.
 
 ### Double buffering
 
