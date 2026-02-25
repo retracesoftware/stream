@@ -277,7 +277,7 @@ class Heartbeat(Control):
 def per_thread(source, thread, timeout):
     import retracesoftware.utils as utils
 
-    is_control = functional.isinstanceof((ThreadSwitch, Heartbeat))
+    is_control = functional.isinstanceof(Control)
     is_thread_switch = functional.isinstanceof(ThreadSwitch)
     
     key_fn = StickyPred(
