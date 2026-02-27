@@ -137,6 +137,7 @@ namespace retracesoftware_stream {
         CMD_NEW_HANDLE,
         CMD_BIND,
         CMD_EXT_BIND,
+        CMD_SERIALIZE_ERROR,
     };
 
 }

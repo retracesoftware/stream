@@ -80,6 +80,7 @@ namespace retracesoftware_stream {
         CHECKSUM,
         DROPPED,
         HEARTBEAT,
+        SERIALIZE_ERROR,
 
         FixedSizeTypes__LAST__,
     };
@@ -141,6 +142,7 @@ namespace retracesoftware_stream {
     constexpr Control Checksum = create_fixed_size(FixedSizeTypes::CHECKSUM);
     constexpr Control Dropped = create_fixed_size(FixedSizeTypes::DROPPED);
     constexpr Control Heartbeat = create_fixed_size(FixedSizeTypes::HEARTBEAT);
+    constexpr Control SerializeError = create_fixed_size(FixedSizeTypes::SERIALIZE_ERROR);
     constexpr Control Bind = create_fixed_size(FixedSizeTypes::BIND);
     constexpr Control ExtBind = create_fixed_size(FixedSizeTypes::EXT_BIND);
     // constexpr Control BindingDelete = create_fixed_size(FixedSizeTypes::);
@@ -226,6 +228,7 @@ namespace retracesoftware_stream {
             case FixedSizeTypes::CHECKSUM: return "CHECKSUM";
             case FixedSizeTypes::DROPPED: return "DROPPED";
             case FixedSizeTypes::HEARTBEAT: return "HEARTBEAT";
+            case FixedSizeTypes::SERIALIZE_ERROR: return "SERIALIZE_ERROR";
             default: return nullptr;
         }
     }

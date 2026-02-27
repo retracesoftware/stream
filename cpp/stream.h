@@ -89,7 +89,11 @@ namespace retracesoftware_stream {
     extern PyTypeObject StreamHandle_Type;
     extern PyTypeObject ObjectStream_Type;
     extern PyTypeObject AsyncFilePersister_Type;
+    extern PyTypeObject FramedWriter_Type;
     extern PyTypeObject Deleter_Type;
+
+    class FramedWriter;
+    FramedWriter* FramedWriter_get(PyObject* obj);
 
     struct SetupResult {
         void* forward_queue;    // SPSCQueue<QEntry>*
@@ -105,7 +109,8 @@ namespace retracesoftware_stream {
                                          size_t queue_capacity,
                                          size_t return_queue_capacity,
                                          std::atomic<int64_t>* total_removed,
-                                         PyObject* writer_key);
+                                         PyObject* writer_key,
+                                         bool quit_on_error);
 
     // extern PyTypeObject WeakRefCallback_Type;
     // extern PyTypeObject ObjectReader_Type;

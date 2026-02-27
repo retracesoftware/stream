@@ -120,10 +120,21 @@ def get_path_info():
     }
 
 
+def _skip_shebang(f):
+    """Skip past an optional '#!' shebang line. File position is left
+    at the start of binary data (first PID frame or raw message)."""
+    peek = f.read(2)
+    if peek == b'#!':
+        f.readline()
+    elif peek:
+        f.seek(-len(peek), 1)
+
+
 def list_pids(path):
     """Scan a PID-framed trace and return the set of unique PIDs."""
     pids = set()
     with open(str(path), 'rb') as f:
+        _skip_shebang(f)
         while True:
             header = f.read(6)
             if len(header) < 6:
@@ -135,6 +146,75 @@ def list_pids(path):
     return pids
 
 
+def _write_process_info(fw, info):
+    """Write process info as a JSON line via a FramedWriter.
+
+    The message-layer format is ``{json}\\n`` (no length prefix),
+    transported inside PID-framed chunks.
+    """
+    import json
+
+    info = {**info, 'encoding_version': 1}
+    json_bytes = json.dumps(info, separators=(',', ':')).encode('utf-8')
+    fw.write(json_bytes)
+    fw.write(b'\n')
+    fw.flush()
+
+
+def read_process_info(path, raw=False):
+    """Read JSON process info from the beginning of a trace file.
+
+    When *raw* is False (default), the file is PID-framed and PID
+    headers are parsed to reassemble the JSON payload.  When *raw* is
+    True the file is a plain (unframed) stream.
+
+    In both cases the preamble is a single JSON line terminated by
+    ``\\n`` (no length prefix).
+
+    Returns (info_dict, byte_offset) where byte_offset is the file
+    position immediately after the process info, suitable for passing
+    as ``start_offset`` to the C++ reader.
+    """
+    import json
+
+    with open(str(path), 'rb') as f:
+        if raw:
+            line = f.readline()
+            if not line:
+                raise ValueError("trace file is empty")
+            info = json.loads(line)
+            return info, f.tell()
+
+        _skip_shebang(f)
+
+        # PID-framed path: reassemble the process info payload from
+        # PID frames.  The first frames belong to the main PID and
+        # contain a JSON line (terminated by \n) which may span
+        # multiple PID frames.
+        header = f.read(6)
+        if len(header) < 6:
+            raise ValueError("trace file too short for process info")
+        main_pid = int.from_bytes(header[:4], 'little')
+        payload_len = int.from_bytes(header[4:6], 'little')
+        data = f.read(payload_len)
+
+        while b'\n' not in data:
+            header = f.read(6)
+            if len(header) < 6:
+                raise ValueError("unexpected EOF while reading process info")
+            pid = int.from_bytes(header[:4], 'little')
+            plen = int.from_bytes(header[4:6], 'little')
+            chunk = f.read(plen)
+            if pid == main_pid:
+                data += chunk
+
+        file_offset = f.tell()
+
+    json_bytes = data[:data.index(b'\n')]
+    info = json.loads(json_bytes)
+    return info, file_offset
+
+
 class writer(_backend_mod.ObjectWriter):
 
     def __init__(self, path=None, thread=None, output=None,
@@ -142,22 +222,30 @@ class writer(_backend_mod.ObjectWriter):
                  verbose=False,
                  disable_retrace=None,
                  preamble=None,
-                 append=False,
                  inflight_limit=None,
                  stall_timeout=None,
                  queue_capacity=None,
-                 return_queue_capacity=None):
+                 return_queue_capacity=None,
+                 quit_on_error=False,
+                 serialize_errors=True):
+
+        self._fw = None
 
         if output is None and path is not None:
-            output = _backend_mod.AsyncFilePersister(str(path), append=append)
+            fw = _backend_mod.FramedWriter(str(path))
+            self._fw = fw
+
+            if preamble is not None:
+                _write_process_info(fw, preamble)
+
+            output = _backend_mod.AsyncFilePersister(fw)
 
         self._output = output
         self._disable_retrace = disable_retrace
 
         kwargs = dict(thread=thread, serializer=self.serialize,
                       verbose=verbose,
-                      normalize_path=normalize_path,
-                      preamble=preamble)
+                      normalize_path=normalize_path)
         if inflight_limit is not None:
             kwargs['inflight_limit'] = inflight_limit
         if stall_timeout is not None:
@@ -166,6 +254,10 @@ class writer(_backend_mod.ObjectWriter):
             kwargs['queue_capacity'] = queue_capacity
         if return_queue_capacity is not None:
             kwargs['return_queue_capacity'] = return_queue_capacity
+        if quit_on_error:
+            kwargs['quit_on_error'] = quit_on_error
+        if not serialize_errors:
+            kwargs['serialize_errors'] = False
 
         super().__init__(output, **kwargs)
 
@@ -196,7 +288,10 @@ class writer(_backend_mod.ObjectWriter):
         self.disable()
         if hasattr(self, '_output') and self._output and hasattr(self._output, 'close'):
             self._output.close()
+        if hasattr(self, '_fw') and self._fw and hasattr(self._fw, 'close'):
+            self._fw.close()
         self._output = None
+        self._fw = None
 
     def serialize(self, obj):
         return self.type_serializer.get(type(obj), pickle.dumps)(obj)
@@ -222,18 +317,14 @@ class writer(_backend_mod.ObjectWriter):
         self.flush()
         if hasattr(self._output, 'drain'):
             self._output.drain()
-        if not getattr(self._output, 'is_fifo', False) and hasattr(self._output, 'fd'):
-            import fcntl
-            fd = self._output.fd
-            if fd >= 0:
-                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-                fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_APPEND)
 
     def _after_fork_parent(self):
         if hasattr(self._output, 'resume'):
             self._output.resume()
 
     def _after_fork_child(self):
+        if self._fw:
+            self._fw.resume()
         if hasattr(self._output, 'resume'):
             self._output.resume()
 
@@ -274,24 +365,40 @@ class Heartbeat(Control):
     pass
 
 
+def _resolve_binds(source):
+    """Wrap *source* so that Bind markers are resolved immediately.
+
+    The C++ reader sets ``pending_bind`` when it emits a Bind sentinel.
+    ``bind(None)`` must be called before the next read — otherwise any
+    read-ahead (e.g. by demux) will hit the pending-bind error.
+    """
+    def f():
+        obj = source()
+        while isinstance(obj, Bind):
+            obj.value(None)
+            obj = source()
+        return obj
+    return f
+
+
 def per_thread(source, thread, timeout):
     import retracesoftware.utils as utils
 
     is_control = functional.isinstanceof(Control)
     is_thread_switch = functional.isinstanceof(ThreadSwitch)
-    
+
     key_fn = StickyPred(
         pred=is_thread_switch,
         extract=lambda ts: ts.value,
         initial=thread())
 
-    demux = utils.demux(source=source, key_function=key_fn, timeout_seconds=timeout)
+    demux = utils.demux(source=_resolve_binds(source), key_function=key_fn, timeout_seconds=timeout)
     return drop(is_control, functional.sequence(thread, demux))
 
 
 class reader(_backend_mod.ObjectStreamReader):
 
-    def __init__(self, path, read_timeout, verbose):
+    def __init__(self, path, read_timeout, verbose, start_offset=0, raw=False):
         super().__init__(
             path=str(path),
             deserialize=self.deserialize,
@@ -300,7 +407,9 @@ class reader(_backend_mod.ObjectStreamReader):
             create_stack_delta=lambda to_drop, frames: None,
             read_timeout=read_timeout,
             verbose=verbose,
-            on_heartbeat=Heartbeat)
+            on_heartbeat=Heartbeat,
+            start_offset=start_offset,
+            raw=raw)
 
         self.type_deserializer = {}
 

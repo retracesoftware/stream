@@ -8,6 +8,7 @@ static PyTypeObject * hidden_types[] = {
 };
 
 static PyTypeObject * exposed_types[] = {
+    &retracesoftware_stream::FramedWriter_Type,
     &retracesoftware_stream::ObjectWriter_Type,
     &retracesoftware_stream::ObjectStream_Type,
     &retracesoftware_stream::AsyncFilePersister_Type,

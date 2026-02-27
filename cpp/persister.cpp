@@ -1,5 +1,6 @@
 #include "stream.h"
 #include "writer.h"
+#include "framed_writer.h"
 #include "queueentry.h"
 #include "vendor/SPSCQueue.h"
 #include <structmember.h>
@@ -22,38 +23,47 @@
 
 namespace retracesoftware_stream {
 
+    // When quit_on_error is true, print the Python exception and
+    // terminate instead of silently clearing it.  This turns silent
+    // data-corruption into a visible crash during recording.
+    static void handle_write_error(bool quit_on_error) {
+        if (quit_on_error) {
+            fprintf(stderr, "retrace: serialization error (quit_on_error is set)\n");
+            PyErr_Print();
+            _exit(1);
+        }
+        PyErr_Clear();
+    }
+
     // ── AsyncFilePersister ───────────────────────────────────────
     //
     // Owns the SPSC queue consumer side, a MessageStream for
     // serialization, and a background thread that processes entries.
     // ObjectWriter pushes tagged QEntry values; the persister
-    // thread deserializes objects and writes PID-framed output.
+    // thread deserializes objects and writes PID-framed output
+    // via the FramedWriter received on construction.
 
     struct AsyncFilePersister : PyObject {
-        int fd;
-        bool is_fifo;
-        bool is_socket;
-        size_t output_buf_size;
+        PyObject* framed_writer_obj;  // strong ref to PyFramedWriter
+        FramedWriter* fw;             // borrowed pointer into framed_writer_obj
         std::thread writer_thread;
         std::thread return_thread;
         std::atomic<bool> shutdown_flag;
         std::atomic<bool> return_shutdown;
         bool closed;
         bool thread_started;
-        std::string stored_path;
+        bool quit_on_error;
 
         rigtorp::SPSCQueue<QEntry>* queue;
         rigtorp::SPSCQueue<PyObject*>* return_queue;
-        PidFramedOutput* output;
         MessageStream* stream;
         std::atomic<int64_t>* total_removed_ptr;
-        PyObject* writer_key;         // thread-local dict key for looking up the thread handle
+        PyObject* writer_key;
         PyThreadState* last_tstate;
         std::unordered_map<PyThreadState*, PyObject*>* thread_cache;
 
         std::atomic<uint64_t> processed_cursor{0};
 
-        // Spin until the next entry appears, then pop and return it.
         QEntry consume_next() {
             QEntry* ep;
             while (!(ep = queue->front())) std::this_thread::yield();
@@ -78,14 +88,14 @@ namespace retracesoftware_stream {
             switch (tag_of(e)) {
                 case TAG_OBJECT: {
                     PyObject* obj = as_ptr(e);
-                    try { stream->write(obj); } catch (...) { PyErr_Clear(); }
+                    try { stream->write(obj); } catch (...) { handle_write_error(quit_on_error); }
                     return_obj(obj);
                     break;
                 }
 #if SIZEOF_VOID_P >= 8
                 case TAG_PICKLED: {
                     PyObject* obj = as_ptr(e);
-                    try { stream->write_pre_pickled(obj); } catch (...) { PyErr_Clear(); }
+                    try { stream->write_pre_pickled(obj); } catch (...) { handle_write_error(quit_on_error); }
                     return_obj(obj);
                     break;
                 }
@@ -94,19 +104,19 @@ namespace retracesoftware_stream {
                     switch (cmd_of(e)) {
                         case CMD_LIST: {
                             uint32_t n = len_of(e);
-                            try { stream->write_list_header(n); } catch (...) { PyErr_Clear(); }
+                            try { stream->write_list_header(n); } catch (...) { handle_write_error(quit_on_error); }
                             for (uint32_t i = 0; i < n; i++) consume_and_write_value();
                             break;
                         }
                         case CMD_TUPLE: {
                             uint32_t n = len_of(e);
-                            try { stream->write_tuple_header(n); } catch (...) { PyErr_Clear(); }
+                            try { stream->write_tuple_header(n); } catch (...) { handle_write_error(quit_on_error); }
                             for (uint32_t i = 0; i < n; i++) consume_and_write_value();
                             break;
                         }
                         case CMD_DICT: {
                             uint32_t n = len_of(e);
-                            try { stream->write_dict_header(n); } catch (...) { PyErr_Clear(); }
+                            try { stream->write_dict_header(n); } catch (...) { handle_write_error(quit_on_error); }
                             for (uint32_t i = 0; i < n; i++) {
                                 consume_and_write_value();
                                 consume_and_write_value();
@@ -115,10 +125,14 @@ namespace retracesoftware_stream {
                         }
                         case CMD_PICKLED: {
                             PyObject* obj = consume_ptr();
-                            try { stream->write_pre_pickled(obj); } catch (...) { PyErr_Clear(); }
+                            try { stream->write_pre_pickled(obj); } catch (...) { handle_write_error(quit_on_error); }
                             return_obj(obj);
                             break;
                         }
+                        case CMD_SERIALIZE_ERROR:
+                            try { stream->write_control(SerializeError); } catch (...) { handle_write_error(quit_on_error); }
+                            consume_and_write_value();
+                            break;
                         default: break;
                     }
                     break;
@@ -127,6 +141,7 @@ namespace retracesoftware_stream {
         }
 
         static void writer_loop(AsyncFilePersister* self) {
+            bool quit_on_error = self->quit_on_error;
             while (true) {
                 QEntry* ep;
                 while (!(ep = self->queue->front())) {
@@ -143,38 +158,38 @@ namespace retracesoftware_stream {
                     switch (tag_of(e)) {
                         case TAG_OBJECT: {
                             PyObject* obj = as_ptr(e);
-                            try { self->stream->write(obj); } catch (...) { PyErr_Clear(); }
+                            try { self->stream->write(obj); } catch (...) { handle_write_error(quit_on_error); }
                             self->return_obj(obj);
                             break;
                         }
 #if SIZEOF_VOID_P >= 8
                         case TAG_PICKLED: {
                             PyObject* obj = as_ptr(e);
-                            try { self->stream->write_pre_pickled(obj); } catch (...) { PyErr_Clear(); }
+                            try { self->stream->write_pre_pickled(obj); } catch (...) { handle_write_error(quit_on_error); }
                             self->return_obj(obj);
                             break;
                         }
                         case TAG_NEW_HANDLE: {
                             PyObject* obj = as_ptr(e);
-                            try { self->stream->write_new_handle(obj); } catch (...) { PyErr_Clear(); }
+                            try { self->stream->write_new_handle(obj); } catch (...) { handle_write_error(quit_on_error); }
                             self->return_obj(obj);
                             break;
                         }
                         case TAG_BIND: {
                             PyObject* obj = as_ptr(e);
-                            try { self->stream->bind(obj, false); } catch (...) { PyErr_Clear(); }
+                            try { self->stream->bind(obj, false); } catch (...) { handle_write_error(quit_on_error); }
                             self->return_obj(obj);
                             break;
                         }
                         case TAG_EXT_BIND: {
                             PyObject* obj = as_ptr(e);
-                            try { self->stream->bind(obj, true); } catch (...) { PyErr_Clear(); }
+                            try { self->stream->bind(obj, true); } catch (...) { handle_write_error(quit_on_error); }
                             self->return_obj(obj);
                             break;
                         }
 #endif
                         case TAG_DELETE: {
-                            try { self->stream->object_freed(as_ptr(e)); } catch (...) { PyErr_Clear(); }
+                            try { self->stream->object_freed(as_ptr(e)); } catch (...) { handle_write_error(quit_on_error); }
                             break;
                         }
                         case TAG_THREAD: {
@@ -197,7 +212,7 @@ namespace retracesoftware_stream {
                                 }
                                 if (handle) {
                                     try { self->stream->write_thread_switch(handle); }
-                                    catch (...) { PyErr_Clear(); }
+                                    catch (...) { handle_write_error(quit_on_error); }
                                 }
                             }
                             break;
@@ -205,29 +220,29 @@ namespace retracesoftware_stream {
                         case TAG_COMMAND: {
                             switch (cmd_of(e)) {
                                 case CMD_HANDLE_REF:
-                                    try { self->stream->write_handle_ref_by_index(len_of(e)); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->write_handle_ref_by_index(len_of(e)); } catch (...) { handle_write_error(quit_on_error); }
                                     break;
                                 case CMD_HANDLE_DELETE:
-                                    try { self->stream->write_handle_delete(len_of(e)); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->write_handle_delete(len_of(e)); } catch (...) { handle_write_error(quit_on_error); }
                                     break;
                                 case CMD_FLUSH:
-                                    try { self->stream->flush(); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->flush(); } catch (...) { handle_write_error(quit_on_error); }
                                     break;
                                 case CMD_LIST: {
                                     uint32_t n = len_of(e);
-                                    try { self->stream->write_list_header(n); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->write_list_header(n); } catch (...) { handle_write_error(quit_on_error); }
                                     for (uint32_t i = 0; i < n; i++) self->consume_and_write_value();
                                     break;
                                 }
                                 case CMD_TUPLE: {
                                     uint32_t n = len_of(e);
-                                    try { self->stream->write_tuple_header(n); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->write_tuple_header(n); } catch (...) { handle_write_error(quit_on_error); }
                                     for (uint32_t i = 0; i < n; i++) self->consume_and_write_value();
                                     break;
                                 }
                                 case CMD_DICT: {
                                     uint32_t n = len_of(e);
-                                    try { self->stream->write_dict_header(n); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->write_dict_header(n); } catch (...) { handle_write_error(quit_on_error); }
                                     for (uint32_t i = 0; i < n; i++) {
                                         self->consume_and_write_value();
                                         self->consume_and_write_value();
@@ -235,35 +250,39 @@ namespace retracesoftware_stream {
                                     break;
                                 }
                                 case CMD_HEARTBEAT:
-                                    try { self->stream->write_control(Heartbeat); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->write_control(Heartbeat); } catch (...) { handle_write_error(quit_on_error); }
+                                    self->consume_and_write_value();
+                                    break;
+                                case CMD_SERIALIZE_ERROR:
+                                    try { self->stream->write_control(SerializeError); } catch (...) { handle_write_error(quit_on_error); }
                                     self->consume_and_write_value();
                                     break;
                                 case CMD_PICKLED: {
                                     PyObject* obj = self->consume_ptr();
-                                    try { self->stream->write_pre_pickled(obj); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->write_pre_pickled(obj); } catch (...) { handle_write_error(quit_on_error); }
                                     self->return_obj(obj);
                                     break;
                                 }
                                 case CMD_NEW_HANDLE: {
                                     PyObject* obj = self->consume_ptr();
-                                    try { self->stream->write_new_handle(obj); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->write_new_handle(obj); } catch (...) { handle_write_error(quit_on_error); }
                                     self->return_obj(obj);
                                     break;
                                 }
                                 case CMD_BIND: {
                                     PyObject* obj = self->consume_ptr();
-                                    try { self->stream->bind(obj, false); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->bind(obj, false); } catch (...) { handle_write_error(quit_on_error); }
                                     self->return_obj(obj);
                                     break;
                                 }
                                 case CMD_EXT_BIND: {
                                     PyObject* obj = self->consume_ptr();
-                                    try { self->stream->bind(obj, true); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->bind(obj, true); } catch (...) { handle_write_error(quit_on_error); }
                                     self->return_obj(obj);
                                     break;
                                 }
                                 case CMD_SHUTDOWN:
-                                    try { self->stream->flush(); } catch (...) { PyErr_Clear(); }
+                                    try { self->stream->flush(); } catch (...) { handle_write_error(quit_on_error); }
                                     self->processed_cursor.fetch_add(1, std::memory_order_release);
                                     PyGILState_Release(gstate);
                                     return;
@@ -275,7 +294,7 @@ namespace retracesoftware_stream {
                     self->processed_cursor.fetch_add(1, std::memory_order_release);
                 }
 
-                try { self->stream->flush(); } catch (...) { PyErr_Clear(); }
+                try { self->stream->flush(); } catch (...) { handle_write_error(quit_on_error); }
 
                 PyGILState_Release(gstate);
             }
@@ -319,8 +338,9 @@ namespace retracesoftware_stream {
 
         SetupResult setup(PyObject* serializer, size_t queue_capacity,
                          size_t return_queue_capacity, std::atomic<int64_t>* total_removed,
-                         PyObject* wkey) {
+                         PyObject* wkey, bool quit_on_error_arg) {
             if (queue) return {queue, return_queue};
+            quit_on_error = quit_on_error_arg;
 
             queue = new rigtorp::SPSCQueue<QEntry>(queue_capacity);
             return_queue = new rigtorp::SPSCQueue<PyObject*>(return_queue_capacity);
@@ -329,8 +349,7 @@ namespace retracesoftware_stream {
             last_tstate = nullptr;
             thread_cache = new std::unordered_map<PyThreadState*, PyObject*>();
 
-            output = new PidFramedOutput(fd, output_buf_size);
-            stream = new MessageStream(PidFramedOutput::write, output, serializer);
+            stream = new MessageStream(*fw, serializer, quit_on_error);
 
             shutdown_flag.store(false, std::memory_order_release);
             return_shutdown.store(false, std::memory_order_release);
@@ -368,6 +387,7 @@ namespace retracesoftware_stream {
                             for (uint32_t i = 0, n = len_of(e) * 2; i < n; i++) drain_value();
                             break;
                         case CMD_HEARTBEAT:
+                        case CMD_SERIALIZE_ERROR:
                             drain_value();
                             break;
                         case CMD_PICKLED:
@@ -414,6 +434,7 @@ namespace retracesoftware_stream {
                                 for (uint32_t i = 0, n = len_of(e) * 2; i < n; i++) drain_value();
                                 break;
                             case CMD_HEARTBEAT:
+                            case CMD_SERIALIZE_ERROR:
                                 drain_value();
                                 break;
                             case CMD_PICKLED:
@@ -477,10 +498,6 @@ namespace retracesoftware_stream {
                 delete stream;
                 stream = nullptr;
             }
-            if (output) {
-                delete output;
-                output = nullptr;
-            }
 
             clear_thread_cache();
             if (thread_cache) {
@@ -495,11 +512,6 @@ namespace retracesoftware_stream {
             if (return_queue) {
                 delete return_queue;
                 return_queue = nullptr;
-            }
-
-            if (fd >= 0) {
-                ::close(fd);
-                fd = -1;
             }
         }
 
@@ -535,8 +547,8 @@ namespace retracesoftware_stream {
         }
 
         void do_resume() {
-            if (closed || fd < 0 || !queue) return;
-            if (output) output->stamp_pid();
+            if (closed || !fw || !queue) return;
+            fw->stamp_pid();
             last_tstate = nullptr;
             clear_thread_cache();
             shutdown_flag.store(false, std::memory_order_release);
@@ -559,17 +571,15 @@ namespace retracesoftware_stream {
         static PyObject* tp_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
             AsyncFilePersister* self = (AsyncFilePersister*)type->tp_alloc(type, 0);
             if (self) {
-                self->fd = -1;
-                self->is_fifo = false;
-                self->is_socket = false;
-                self->output_buf_size = PIPE_BUF;
+                self->framed_writer_obj = nullptr;
+                self->fw = nullptr;
                 self->shutdown_flag.store(false);
                 self->return_shutdown.store(false);
                 self->closed = true;
                 self->thread_started = false;
+                self->quit_on_error = false;
                 self->queue = nullptr;
                 self->return_queue = nullptr;
-                self->output = nullptr;
                 self->stream = nullptr;
                 self->total_removed_ptr = nullptr;
                 self->writer_key = nullptr;
@@ -578,99 +588,43 @@ namespace retracesoftware_stream {
                 self->processed_cursor.store(0);
                 new (&self->writer_thread) std::thread();
                 new (&self->return_thread) std::thread();
-                new (&self->stored_path) std::string();
             }
             return (PyObject*)self;
         }
 
-        static size_t query_socket_sndbuf(int fd) {
-            int sndbuf = 0;
-            socklen_t len = sizeof(sndbuf);
-            if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &len) == 0 && sndbuf > 0) {
-                return (size_t)sndbuf;
-            }
-            return 65536;
-        }
-
         static int init(AsyncFilePersister* self, PyObject* args, PyObject* kwds) {
-            const char* path;
-            int append = 0;
+            PyObject* writer_obj;
 
-            static const char* kwlist[] = {"path", "append", nullptr};
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|p", (char**)kwlist, &path, &append)) {
+            static const char* kwlist[] = {"writer", nullptr};
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O", (char**)kwlist, &writer_obj))
                 return -1;
-            }
 
-            struct stat st;
-            bool path_is_fifo = false;
-            bool path_is_socket = false;
+            FramedWriter* fw_ptr = FramedWriter_get(writer_obj);
+            if (!fw_ptr) return -1;
 
-            if (::stat(path, &st) == 0) {
-                path_is_fifo = S_ISFIFO(st.st_mode);
-                path_is_socket = S_ISSOCK(st.st_mode);
-            }
-
-            if (path_is_socket) {
-                int sock = ::socket(AF_UNIX, SOCK_DGRAM, 0);
-                if (sock < 0) {
-                    PyErr_Format(PyExc_IOError,
-                        "Could not create socket for: %s: %s", path, strerror(errno));
-                    return -1;
-                }
-
-                struct sockaddr_un addr;
-                memset(&addr, 0, sizeof(addr));
-                addr.sun_family = AF_UNIX;
-                strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-
-                if (::connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-                    PyErr_Format(PyExc_IOError,
-                        "Could not connect to socket: %s: %s", path, strerror(errno));
-                    ::close(sock);
-                    return -1;
-                }
-
-                self->fd = sock;
-                self->is_fifo = false;
-                self->is_socket = true;
-                self->output_buf_size = query_socket_sndbuf(sock);
-
-            } else {
-                int flags = O_WRONLY;
-                if (!path_is_fifo) flags |= O_CREAT | (append ? O_APPEND : O_TRUNC);
-
-                self->fd = ::open(path, flags, 0644);
-                if (self->fd < 0) {
-                    PyErr_Format(PyExc_IOError,
-                        "Could not open file: %s for writing: %s", path, strerror(errno));
-                    return -1;
-                }
-
-                self->is_fifo = path_is_fifo;
-                self->is_socket = false;
-                self->output_buf_size = path_is_fifo ? PIPE_BUF : 65536;
-
-                if (!path_is_fifo) {
-                    if (flock(self->fd, LOCK_EX | LOCK_NB) == -1) {
-                        PyErr_Format(PyExc_IOError,
-                            "Could not lock file: %s for exclusive access: %s", path, strerror(errno));
-                        ::close(self->fd);
-                        self->fd = -1;
-                        return -1;
-                    }
-                }
-            }
-
-            self->stored_path = path;
+            self->framed_writer_obj = Py_NewRef(writer_obj);
+            self->fw = fw_ptr;
             self->closed = false;
 
+            return 0;
+        }
+
+        static int traverse(AsyncFilePersister* self, visitproc visit, void* arg) {
+            Py_VISIT(self->framed_writer_obj);
+            return 0;
+        }
+
+        static int clear(AsyncFilePersister* self) {
+            Py_CLEAR(self->framed_writer_obj);
             return 0;
         }
 
         static void dealloc(AsyncFilePersister* self) {
             self->do_close();
 
-            self->stored_path.~basic_string();
+            PyObject_GC_UnTrack(self);
+            clear(self);
+
             self->writer_thread.~thread();
             self->return_thread.~thread();
 
@@ -680,16 +634,23 @@ namespace retracesoftware_stream {
 
     static PyObject* AsyncFilePersister_path_getter(PyObject* obj, void*) {
         AsyncFilePersister* self = (AsyncFilePersister*)obj;
-        return PyUnicode_FromStringAndSize(
-            self->stored_path.c_str(), self->stored_path.size());
+        if (self->framed_writer_obj) {
+            return PyObject_GetAttrString(self->framed_writer_obj, "path");
+        }
+        return PyUnicode_FromString("");
     }
 
     static PyObject* AsyncFilePersister_fd_getter(PyObject* obj, void*) {
-        return PyLong_FromLong(((AsyncFilePersister*)obj)->fd);
+        AsyncFilePersister* self = (AsyncFilePersister*)obj;
+        return PyLong_FromLong(self->fw ? self->fw->fd() : -1);
     }
 
     static PyObject* AsyncFilePersister_is_fifo_getter(PyObject* obj, void*) {
-        return PyBool_FromLong(((AsyncFilePersister*)obj)->is_fifo);
+        AsyncFilePersister* self = (AsyncFilePersister*)obj;
+        if (self->framed_writer_obj) {
+            return PyObject_GetAttrString(self->framed_writer_obj, "is_fifo");
+        }
+        return PyBool_FromLong(0);
     }
 
     static PyMethodDef AsyncFilePersister_methods[] = {
@@ -713,14 +674,15 @@ namespace retracesoftware_stream {
                                          size_t queue_capacity,
                                          size_t return_queue_capacity,
                                          std::atomic<int64_t>* total_removed,
-                                         PyObject* writer_key) {
+                                         PyObject* writer_key,
+                                         bool quit_on_error) {
         if (Py_TYPE(persister) != &AsyncFilePersister_Type) {
             PyErr_SetString(PyExc_TypeError, "expected AsyncFilePersister");
             return {nullptr, nullptr};
         }
         return ((AsyncFilePersister*)persister)->setup(serializer, queue_capacity,
                                                        return_queue_capacity, total_removed,
-                                                       writer_key);
+                                                       writer_key, quit_on_error);
     }
 
     PyTypeObject AsyncFilePersister_Type = {
@@ -729,8 +691,10 @@ namespace retracesoftware_stream {
         .tp_basicsize = sizeof(AsyncFilePersister),
         .tp_itemsize = 0,
         .tp_dealloc = (destructor)AsyncFilePersister::dealloc,
-        .tp_flags = Py_TPFLAGS_DEFAULT,
+        .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
         .tp_doc = "Async file persister -- serializes and writes to file on a background thread",
+        .tp_traverse = (traverseproc)AsyncFilePersister::traverse,
+        .tp_clear = (inquiry)AsyncFilePersister::clear,
         .tp_methods = AsyncFilePersister_methods,
         .tp_getset = AsyncFilePersister_getset,
         .tp_init = (initproc)AsyncFilePersister::init,

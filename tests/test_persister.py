@@ -15,7 +15,15 @@ pytest.importorskip("retracesoftware.stream")
 import retracesoftware.stream as stream
 
 _mod = stream._backend_mod
+FramedWriter = _mod.FramedWriter
 AsyncFilePersister = _mod.AsyncFilePersister
+
+
+def _make_persister(path):
+    """Create a FramedWriter + AsyncFilePersister pair."""
+    fw = FramedWriter(str(path))
+    p = AsyncFilePersister(fw)
+    return fw, p
 
 _thread_id = lambda: threading.current_thread().ident
 
@@ -39,24 +47,27 @@ def _unframe(data: bytes) -> bytes:
 def test_construct_and_close(tmp_path):
     """Persister opens a file; close joins any threads."""
     path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
+    fw, p = _make_persister(path)
     assert path.exists()
     p.close()
+    fw.close()
 
 
 def test_close_is_idempotent(tmp_path):
     """Calling close() multiple times must not crash."""
-    p = AsyncFilePersister(str(tmp_path / "out.bin"))
+    fw, p = _make_persister(tmp_path / "out.bin")
     p.close()
     p.close()
     p.close()
+    fw.close()
 
 
 def test_dealloc_without_close(tmp_path):
     """Dropping all references should cleanly shut down."""
     path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
+    fw, p = _make_persister(path)
     del p
+    del fw
     gc.collect()
     assert path.exists()
 
@@ -64,16 +75,16 @@ def test_dealloc_without_close(tmp_path):
 def test_open_nonexistent_directory():
     """Opening a file in a missing directory raises IOError."""
     with pytest.raises(IOError):
-        AsyncFilePersister("/no/such/directory/file.bin")
+        FramedWriter("/no/such/directory/file.bin")
 
 
 def test_exclusive_lock(tmp_path):
-    """A second persister on the same file must fail with IOError (flock)."""
+    """A second FramedWriter on the same file must fail with IOError (flock)."""
     path = tmp_path / "locked.bin"
-    p1 = AsyncFilePersister(str(path))
+    fw1 = FramedWriter(str(path))
     with pytest.raises(IOError, match="exclusive"):
-        AsyncFilePersister(str(path))
-    p1.close()
+        FramedWriter(str(path))
+    fw1.close()
 
 
 # ---------------------------------------------------------------------------
@@ -124,14 +135,15 @@ def test_truncates_existing_file(tmp_path):
     path = tmp_path / "out.bin"
     path.write_bytes(b"old content that should disappear")
 
-    p = AsyncFilePersister(str(path))
+    fw, p = _make_persister(path)
     p.close()
+    fw.close()
 
     assert path.read_bytes() == b""
 
 
 def test_append_mode(tmp_path):
-    """Opening with append=True preserves existing data."""
+    """FramedWriter always appends, so a second writer preserves existing data."""
     path = tmp_path / "out.bin"
 
     with stream.writer(path, thread=_thread_id) as w:
@@ -141,7 +153,7 @@ def test_append_mode(tmp_path):
     size_after_first = path.stat().st_size
     assert size_after_first > 0
 
-    with stream.writer(path, thread=_thread_id, append=True) as w:
+    with stream.writer(path, thread=_thread_id) as w:
         w("second")
         w.flush()
 
@@ -151,10 +163,11 @@ def test_append_mode(tmp_path):
 def test_drain_and_resume(tmp_path):
     """Drain stops the writer thread; resume restarts it."""
     path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
+    fw, p = _make_persister(path)
     p.drain()
     p.resume()
     p.close()
+    fw.close()
 
 
 def test_many_writes_stress(tmp_path):
@@ -173,15 +186,15 @@ def test_many_writes_stress(tmp_path):
 def test_fd_getter(tmp_path):
     """The fd property returns a valid file descriptor."""
     path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
-    assert p.fd >= 0
-    p.close()
-    assert p.fd < 0
+    fw = FramedWriter(str(path))
+    assert fw.fd >= 0
+    fw.close()
+    assert fw.fd < 0
 
 
 def test_path_getter(tmp_path):
     """The path property returns the file path."""
     path = tmp_path / "out.bin"
-    p = AsyncFilePersister(str(path))
-    assert p.path == str(path)
-    p.close()
+    fw = FramedWriter(str(path))
+    assert fw.path == str(path)
+    fw.close()

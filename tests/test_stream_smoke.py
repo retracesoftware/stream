@@ -215,16 +215,19 @@ def test_custom_output_roundtrip(tmp_path):
 
 
 def test_async_file_persister_explicit(tmp_path):
-    """Test explicit construction of AsyncFilePersister and roundtrip."""
+    """Test explicit construction of FramedWriter + AsyncFilePersister and roundtrip."""
     import retracesoftware.stream as st
 
     path = tmp_path / "async_trace.bin"
-    persister = st._backend_mod.AsyncFilePersister(str(path))
+    fw = st._backend_mod.FramedWriter(str(path))
+    persister = st._backend_mod.AsyncFilePersister(fw)
 
     with stream.writer(output=persister, thread=_thread_id, flush_interval=0.01) as w:
         w("async", "persister", 42)
         w({"key": "value"}, [1, 2, 3])
         w.flush()
+
+    fw.close()
 
     with stream.reader(path=path, read_timeout=1, verbose=False) as r:
         assert _read_value(r) == "async"

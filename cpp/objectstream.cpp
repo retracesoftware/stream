@@ -58,7 +58,9 @@ namespace retracesoftware_stream {
         PyObject * create_heartbeat = nullptr;
         bool verbose = false;
 
-        // PID-framed reading state
+        bool raw_mode = false;
+
+        // PID-framed reading state (unused when raw_mode=true)
         uint8_t* frame_data = nullptr;
         size_t frame_capacity = 0;
         size_t frame_pos = 0;
@@ -83,6 +85,8 @@ namespace retracesoftware_stream {
 
             int read_timeout = 0;
             int verbose = 0;
+            long long start_offset = 0;
+            int raw = 0;
 
             static const char* kwlist[] = {
                 "path", 
@@ -94,9 +98,11 @@ namespace retracesoftware_stream {
                 "verbose",
                 "on_dropped",
                 "on_heartbeat",
+                "start_offset",
+                "raw",
                 nullptr};
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOip|OO", (char **)kwlist, 
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOip|OOLp", (char **)kwlist, 
                 &PyUnicode_Type, &path, 
                 &create_pickled,
                 &bind_singleton,
@@ -105,7 +111,9 @@ namespace retracesoftware_stream {
                 &read_timeout,
                 &verbose,
                 &create_dropped,
-                &create_heartbeat)) {
+                &create_heartbeat,
+                &start_offset,
+                &raw)) {
                 return -1;
             }
 
@@ -125,11 +133,15 @@ namespace retracesoftware_stream {
             self->create_heartbeat = Py_XNewRef(create_heartbeat);
             self->read_timeout = read_timeout;
             self->verbose = verbose;
+            self->raw_mode = (raw != 0);
 
             self->vectorcall = (vectorcallfunc)call;
 
             try {
                 self->file = open(path);
+                if (start_offset > 0) {
+                    fseek(self->file, (long)start_offset, SEEK_SET);
+                }
             } catch (...) {
                 return -1;
             }
@@ -302,6 +314,11 @@ namespace retracesoftware_stream {
         }
 
         void read(uint8_t * bytes, size_t size) {
+            if (raw_mode) {
+                raw_read(bytes, size);
+                bytes_read += size;
+                return;
+            }
             size_t total = 0;
             while (total < size) {
                 size_t avail = frame_len - frame_pos;
@@ -639,7 +656,10 @@ namespace retracesoftware_stream {
                     return PyFloat_FromDouble(read<double>());
                 case FixedSizeTypes::INT64:
                     return PyLong_FromLongLong(read<int64_t>());
-                
+
+                case FixedSizeTypes::SERIALIZE_ERROR:
+                    return read();
+
                 default:
                     const char * name = FixedSizeTypes_Name(static_cast<FixedSizeTypes>(type));
 

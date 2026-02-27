@@ -134,7 +134,10 @@ namespace retracesoftware_stream {
         int next_handle;
         int pid;
         bool verbose;
+        bool quit_on_error;
+        bool serialize_errors = true;
         bool buffer_writes = true;
+        PyObject * serializer = nullptr;
         PyObject * enable_when;
         PyObject* thread;
         vectorcallfunc vectorcall;
@@ -396,21 +399,60 @@ namespace retracesoftware_stream {
                     push_obj(obj, estimate_memory_view_size(obj));
                 } else {
                     wait_for_inflight();
-                    PyObject* dumps = pickle_dumps_fn();
-                    PyObject* pickled = dumps ? PyObject_CallOneArg(dumps, obj) : nullptr;
-                    if (pickled) {
-                        total_added += estimate_bytes_size(pickled);
+                    // Try the full serializer (type_serializer + pickle fallback)
+                    PyObject* res = PyObject_CallOneArg(serializer, obj);
+                    if (res) {
+                        if (PyBytes_Check(res)) {
+                            // Serializer returned pickled bytes
+                            total_added += estimate_bytes_size(res);
 #if SIZEOF_VOID_P >= 8
-                        push(pickled_entry(pickled));
+                            push(pickled_entry(res));
 #else
-                        push(cmd_entry(CMD_PICKLED));
-                        push(obj_entry(pickled));
+                            push(cmd_entry(CMD_PICKLED));
+                            push(obj_entry(res));
 #endif
+                        } else {
+                            // Serializer returned a converted object (e.g. Stack → tuple)
+                            push_value(res, depth + 1);
+                            Py_DECREF(res);
+                        }
                     } else {
-                        PyErr_Clear();
-                        Py_INCREF(obj);
-                        total_added += estimate_size(obj);
-                        push(obj_entry(obj));
+                        // Serialization failed — push SERIALIZE_ERROR tag + error info dict
+                        PyObject *ptype, *pvalue, *ptb;
+                        PyErr_Fetch(&ptype, &pvalue, &ptb);
+
+                        PyObject* error_dict = PyDict_New();
+                        if (error_dict) {
+                            PyObject* obj_type_str = PyUnicode_FromString(Py_TYPE(obj)->tp_name);
+                            if (obj_type_str) { PyDict_SetItemString(error_dict, "object_type", obj_type_str); Py_DECREF(obj_type_str); }
+
+                            if (ptype) {
+                                PyObject* name = PyObject_GetAttrString(ptype, "__name__");
+                                if (name) { PyDict_SetItemString(error_dict, "error_type", name); Py_DECREF(name); }
+                                else PyErr_Clear();
+                            }
+                            if (pvalue) {
+                                PyObject* msg = PyObject_Str(pvalue);
+                                if (msg) { PyDict_SetItemString(error_dict, "error", msg); Py_DECREF(msg); }
+                                else PyErr_Clear();
+                            }
+
+                            push(cmd_entry(CMD_SERIALIZE_ERROR));
+                            push_value(error_dict, depth + 1);
+                            Py_DECREF(error_dict);
+                        } else {
+                            PyErr_Clear();
+                            push(obj_entry(Py_None));
+                        }
+
+                        if (!serialize_errors) {
+                            PyErr_Restore(ptype, pvalue, ptb);
+                            throw nullptr;
+                        } else {
+                            Py_XDECREF(ptype);
+                            Py_XDECREF(pvalue);
+                            Py_XDECREF(ptb);
+                        }
                     }
                 }
             }
@@ -557,35 +599,39 @@ namespace retracesoftware_stream {
             PyObject * thread = nullptr;
             PyObject * normalize_path = nullptr;
             PyObject * serializer = nullptr;
-            PyObject * preamble = nullptr;
-
             int verbose = 0;
+            int quit_on_error = 0;
+            int serialize_errors = 1;
             long long inflight_limit_arg = 128LL * 1024 * 1024;
             int stall_timeout_arg = 5;
             Py_ssize_t queue_capacity_arg = 65536;
             Py_ssize_t return_queue_capacity_arg = 131072;
-            
+
             static const char* kwlist[] = {
-                "output", 
-                "serializer", 
-                "thread", 
-                "verbose", 
+                "output",
+                "serializer",
+                "thread",
+                "verbose",
                 "normalize_path",
-                "preamble",
                 "inflight_limit",
                 "stall_timeout",
                 "queue_capacity",
                 "return_queue_capacity",
+                "quit_on_error",
+                "serialize_errors",
                 nullptr};
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OpOOLinn", (char **)kwlist, 
-                &output, &serializer, &thread, &verbose, &normalize_path, &preamble,
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "OO|OpOLinnpp", (char **)kwlist,
+                &output, &serializer, &thread, &verbose, &normalize_path,
                 &inflight_limit_arg, &stall_timeout_arg,
-                &queue_capacity_arg, &return_queue_capacity_arg)) {
-                return -1;  
+                &queue_capacity_arg, &return_queue_capacity_arg,
+                &quit_on_error, &serialize_errors)) {
+                return -1;
             }
 
             self->verbose = verbose;
+            self->quit_on_error = quit_on_error;
+            self->serialize_errors = serialize_errors;
             self->buffer_writes = true;
 
             self->path = Py_NewRef(Py_None);
@@ -596,6 +642,7 @@ namespace retracesoftware_stream {
             
             self->vectorcall = reinterpret_cast<vectorcallfunc>(ObjectWriter::py_vectorcall);
 
+            self->serializer = Py_NewRef(serializer);
             self->normalize_path = Py_XNewRef(normalize_path);
             self->enable_when = nullptr;
             self->queue = nullptr;
@@ -611,20 +658,12 @@ namespace retracesoftware_stream {
                                                          (size_t)queue_capacity_arg,
                                                          (size_t)return_queue_capacity_arg,
                                                          &self->total_removed,
-                                                         self->thread);
+                                                         self->thread,
+                                                         self->quit_on_error);
                 if (!r.forward_queue) return -1;
                 self->queue = (rigtorp::SPSCQueue<QEntry>*)r.forward_queue;
                 self->return_queue = (rigtorp::SPSCQueue<PyObject*>*)r.return_queue;
                 self->persister = Py_NewRef(output);
-            }
-
-            if (preamble && preamble != Py_None && !self->is_disabled()) {
-                try {
-                    self->write_root(preamble);
-                    self->push(cmd_entry(CMD_FLUSH));
-                } catch (...) {
-                    return -1;
-                }
             }
 
             writers.push_back(self);
@@ -639,6 +678,7 @@ namespace retracesoftware_stream {
 
         static int traverse(ObjectWriter* self, visitproc visit, void* arg) {
             Py_VISIT(self->persister);
+            Py_VISIT(self->serializer);
             Py_VISIT(self->thread);
             Py_VISIT(self->path);
             Py_VISIT(self->normalize_path);
@@ -647,6 +687,7 @@ namespace retracesoftware_stream {
 
         static int clear(ObjectWriter* self) {
             Py_CLEAR(self->persister);
+            Py_CLEAR(self->serializer);
             Py_CLEAR(self->thread);
             Py_CLEAR(self->path);
             Py_CLEAR(self->normalize_path);
