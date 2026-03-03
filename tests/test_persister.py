@@ -78,13 +78,23 @@ def test_open_nonexistent_directory():
         FramedWriter("/no/such/directory/file.bin")
 
 
-def test_exclusive_lock(tmp_path):
-    """A second FramedWriter on the same file must fail with IOError (flock)."""
-    path = tmp_path / "locked.bin"
+def test_multiple_writers_can_append_same_file(tmp_path):
+    """Two FramedWriters can coexist and append PID-framed payloads."""
+    path = tmp_path / "shared.bin"
     fw1 = FramedWriter(str(path))
-    with pytest.raises(IOError, match="exclusive"):
-        FramedWriter(str(path))
-    fw1.close()
+    fw2 = FramedWriter(str(path))
+    try:
+        fw1.write(b"first")
+        fw1.flush()
+        fw2.write(b"second")
+        fw2.flush()
+    finally:
+        fw2.close()
+        fw1.close()
+
+    payload = _unframe(path.read_bytes())
+    assert b"first" in payload
+    assert b"second" in payload
 
 
 # ---------------------------------------------------------------------------
@@ -130,16 +140,17 @@ def test_close_drains_queue(tmp_path):
     assert len(payload) > 0
 
 
-def test_truncates_existing_file(tmp_path):
-    """Opening a path that already contains data truncates to zero."""
+def test_open_preserves_existing_file(tmp_path):
+    """Opening a writer does not truncate an existing regular file."""
     path = tmp_path / "out.bin"
-    path.write_bytes(b"old content that should disappear")
+    old = b"old content that should remain"
+    path.write_bytes(old)
 
     fw, p = _make_persister(path)
     p.close()
     fw.close()
 
-    assert path.read_bytes() == b""
+    assert path.read_bytes() == old
 
 
 def test_append_mode(tmp_path):
