@@ -178,14 +178,14 @@ def read_process_info(path, raw=False):
     import json
 
     with open(str(path), 'rb') as f:
+        _skip_shebang(f)
+
         if raw:
             line = f.readline()
             if not line:
                 raise ValueError("trace file is empty")
             info = json.loads(line)
             return info, f.tell()
-
-        _skip_shebang(f)
 
         # PID-framed path: reassemble the process info payload from
         # PID frames.  The first frames belong to the main PID and
@@ -314,19 +314,30 @@ class writer(_backend_mod.ObjectWriter):
     # and the reader demuxes by PID.
 
     def _before_fork(self):
+        self._pre_fork_pid = os.getpid()
+        self._fork_count = getattr(self, '_fork_count', 0)
         self.flush()
         if hasattr(self._output, 'drain'):
             self._output.drain()
+        self._pre_fork_offset = self._fw.bytes_written
 
     def _after_fork_parent(self):
+        self._fork_count += 1
         if hasattr(self._output, 'resume'):
             self._output.resume()
 
     def _after_fork_child(self):
         if self._fw:
             self._fw.resume()
+            _write_process_info(self._fw, {
+                'type': 'fork',
+                'parent_pid': self._pre_fork_pid,
+                'fork_index': self._fork_count,
+                'parent_offset': self._pre_fork_offset,
+            })
         if hasattr(self._output, 'resume'):
             self._output.resume()
+        self._fork_count = 0
 
 
 class StickyPred:
