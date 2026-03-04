@@ -47,6 +47,7 @@ private:
     size_t max_payload_;
     uint8_t pid_bytes_[4];
     std::vector<uint8_t> buf_;
+    uint64_t bytes_written_ = 0;
 
     void write_raw(const uint8_t* data, size_t len) {
         while (len > 0) {
@@ -120,6 +121,8 @@ public:
     void flush() {
         if (buf_.empty() || fd_ < 0) return;
 
+        bytes_written_ += buf_.size();
+
         const uint8_t* data = buf_.data();
         size_t remaining = buf_.size();
         uint8_t frame_header[FRAME_HEADER_SIZE];
@@ -148,6 +151,7 @@ public:
     bool is_closed() const { return fd_ < 0; }
 
     size_t buffered() const { return buf_.size(); }
+    uint64_t bytes_written() const { return bytes_written_; }
 };
 
 }

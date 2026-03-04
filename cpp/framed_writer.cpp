@@ -202,6 +202,12 @@ namespace retracesoftware_stream {
         return PyBool_FromLong(((PyFramedWriter*)obj)->is_fifo);
     }
 
+    static PyObject* PyFramedWriter_bytes_written_getter(PyObject* obj, void*) {
+        auto* self = (PyFramedWriter*)obj;
+        return PyLong_FromUnsignedLongLong(
+            self->writer ? self->writer->bytes_written() : 0);
+    }
+
     static PyMethodDef PyFramedWriter_methods[] = {
         {"write",        (PyCFunction)PyFramedWriter::py_write,       METH_O,      "Write raw bytes to the buffer"},
         {"write_uint16", (PyCFunction)PyFramedWriter::py_write_uint16, METH_O,     "Write a uint16 (little-endian)"},
@@ -217,9 +223,10 @@ namespace retracesoftware_stream {
     };
 
     static PyGetSetDef PyFramedWriter_getset[] = {
-        {"path",    PyFramedWriter_path_getter,    nullptr, "File path",            NULL},
-        {"fd",      PyFramedWriter_fd_getter,      nullptr, "Underlying fd",        NULL},
-        {"is_fifo", PyFramedWriter_is_fifo_getter, nullptr, "True if output is FIFO", NULL},
+        {"path",          PyFramedWriter_path_getter,          nullptr, "File path",                       NULL},
+        {"fd",            PyFramedWriter_fd_getter,            nullptr, "Underlying fd",                   NULL},
+        {"is_fifo",       PyFramedWriter_is_fifo_getter,       nullptr, "True if output is FIFO",          NULL},
+        {"bytes_written", PyFramedWriter_bytes_written_getter, nullptr, "Total unframed payload bytes written", NULL},
         {NULL}
     };
 
