@@ -45,6 +45,7 @@ public:
 private:
     int fd_ = -1;
     size_t max_payload_;
+    bool raw_ = false;
     uint8_t pid_bytes_[4];
     std::vector<uint8_t> buf_;
     uint64_t bytes_written_ = 0;
@@ -64,9 +65,10 @@ private:
 public:
     FramedWriter() : max_payload_(0) {}
 
-    FramedWriter(int fd, size_t frame_size)
+    FramedWriter(int fd, size_t frame_size, bool raw = false)
         : fd_(fd),
-          max_payload_(std::min(frame_size, MAX_FRAME) - FRAME_HEADER_SIZE)
+          max_payload_(std::min(frame_size, MAX_FRAME) - FRAME_HEADER_SIZE),
+          raw_(raw)
     {
         buf_.reserve(65536);
         stamp_pid();
@@ -122,6 +124,12 @@ public:
         if (buf_.empty() || fd_ < 0) return;
 
         bytes_written_ += buf_.size();
+
+        if (raw_) {
+            write_raw(buf_.data(), buf_.size());
+            buf_.clear();
+            return;
+        }
 
         const uint8_t* data = buf_.data();
         size_t remaining = buf_.size();

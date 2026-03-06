@@ -40,9 +40,10 @@ namespace retracesoftware_stream {
 
         static int init(PyFramedWriter* self, PyObject* args, PyObject* kwds) {
             const char* path;
+            int raw = 0;
 
-            static const char* kwlist[] = {"path", nullptr};
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "s", (char**)kwlist, &path))
+            static const char* kwlist[] = {"path", "raw", nullptr};
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|p", (char**)kwlist, &path, &raw))
                 return -1;
 
             struct stat st;
@@ -93,7 +94,7 @@ namespace retracesoftware_stream {
                 frame_size = path_is_fifo ? PIPE_BUF : 65536;
             }
 
-            self->writer = new FramedWriter(fd, frame_size);
+            self->writer = new FramedWriter(fd, frame_size, (bool)raw);
             self->stored_path = path;
             self->is_fifo = path_is_fifo;
             self->is_socket = path_is_socket;

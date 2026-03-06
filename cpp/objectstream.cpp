@@ -38,6 +38,7 @@ namespace retracesoftware_stream {
 
     struct ObjectStream : public PyObject {
         FILE * file = nullptr;
+        PyObject * path = nullptr;
         size_t bytes_read = 0;
         size_t messages_read = 0;
         int read_timeout = 0;
@@ -137,6 +138,8 @@ namespace retracesoftware_stream {
 
             self->vectorcall = (vectorcallfunc)call;
 
+            self->path = Py_NewRef(path);
+
             try {
                 self->file = open(path);
                 if (start_offset > 0) {
@@ -179,6 +182,7 @@ namespace retracesoftware_stream {
         }
 
         static int traverse(ObjectStream* self, visitproc visit, void* arg) {
+            Py_VISIT(self->path);
             Py_VISIT(self->create_pickled);
             Py_VISIT(self->bind_singleton);
             Py_VISIT(self->create_stack_delta);
@@ -206,6 +210,7 @@ namespace retracesoftware_stream {
             }
             self->interned_strings.clear();
 
+            Py_CLEAR(self->path);
             Py_CLEAR(self->create_pickled);
             Py_CLEAR(self->bind_singleton);
             Py_CLEAR(self->create_stack_delta);
@@ -788,6 +793,41 @@ namespace retracesoftware_stream {
             Py_RETURN_NONE;
         }
 
+        static PyObject * py_file_offset(ObjectStream * self, PyObject * unused) {
+            if (!self->file) {
+                PyErr_SetString(PyExc_RuntimeError, "file is not open");
+                return nullptr;
+            }
+            long offset = ftell(self->file);
+            if (offset < 0) {
+                PyErr_SetFromErrno(PyExc_IOError);
+                return nullptr;
+            }
+            return PyLong_FromLong(offset);
+        }
+
+        static PyObject * py_reopen(ObjectStream * self, PyObject * args) {
+            long long offset;
+            if (!PyArg_ParseTuple(args, "L", &offset)) return nullptr;
+            if (!self->path) {
+                PyErr_SetString(PyExc_RuntimeError, "no path stored");
+                return nullptr;
+            }
+            if (self->file) {
+                fclose(self->file);
+                self->file = nullptr;
+            }
+            try {
+                self->file = open(self->path);
+            } catch (...) {
+                return nullptr;
+            }
+            if (offset > 0) {
+                fseek(self->file, (long)offset, SEEK_SET);
+            }
+            Py_RETURN_NONE;
+        }
+
         PyObject * next() {
             if (pending_bind) {
                 PyErr_Format(PyExc_RuntimeError, "Can't reading next as unbound pending bind");
@@ -924,6 +964,10 @@ namespace retracesoftware_stream {
         {"close", (PyCFunction)ObjectStream::py_close, METH_NOARGS, "TODO"},
         {"set_pid", (PyCFunction)ObjectStream::py_set_pid, METH_VARARGS,
          "Switch PID filter and drain any buffered frames for the new PID"},
+        {"file_offset", (PyCFunction)ObjectStream::py_file_offset, METH_NOARGS,
+         "Return the current file read position"},
+        {"reopen", (PyCFunction)ObjectStream::py_reopen, METH_VARARGS,
+         "Close and reopen the trace file at the given byte offset"},
         {NULL}  // Sentinel
     };
 

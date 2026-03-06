@@ -227,12 +227,13 @@ class writer(_backend_mod.ObjectWriter):
                  queue_capacity=None,
                  return_queue_capacity=None,
                  quit_on_error=False,
-                 serialize_errors=True):
+                 serialize_errors=True,
+                 raw=False):
 
         self._fw = None
 
         if output is None and path is not None:
-            fw = _backend_mod.FramedWriter(str(path))
+            fw = _backend_mod.FramedWriter(str(path), raw=raw)
             self._fw = fw
 
             if preamble is not None:
