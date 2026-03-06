@@ -28,7 +28,7 @@ def test_writer_reader_roundtrip(tmp_path):
     """Basic roundtrip with strings and integers."""
     path = tmp_path / "trace.bin"
 
-    with stream.writer(path, thread=_thread_id, flush_interval=0.01) as writer:
+    with stream.writer(path, thread=_thread_id, flush_interval=0.01, raw=True) as writer:
         writer("hello", 123)
         writer.flush()
 
@@ -59,7 +59,7 @@ def test_primitive_types(tmp_path):
         True, False,
     ]
     
-    with stream.writer(path, thread=_thread_id, flush_interval=0.01) as writer:
+    with stream.writer(path, thread=_thread_id, flush_interval=0.01, raw=True) as writer:
         for val in test_values:
             writer(val)
         writer.flush()
@@ -94,7 +94,7 @@ def test_collections(tmp_path):
         frozenset(), frozenset({1, 2, 3}),
     ]
     
-    with stream.writer(path, thread=_thread_id, flush_interval=0.01) as writer:
+    with stream.writer(path, thread=_thread_id, flush_interval=0.01, raw=True) as writer:
         for val in test_values:
             writer(val)
         writer.flush()
@@ -117,7 +117,7 @@ def test_bytes(tmp_path):
         b"x" * 10000,
     ]
     
-    with stream.writer(path, thread=_thread_id, flush_interval=0.01) as writer:
+    with stream.writer(path, thread=_thread_id, flush_interval=0.01, raw=True) as writer:
         for val in test_values:
             writer(val)
         writer.flush()
@@ -132,7 +132,7 @@ def test_multiple_writes_single_call(tmp_path):
     """Test writing multiple values in a single call."""
     path = tmp_path / "trace.bin"
     
-    with stream.writer(path, thread=_thread_id, flush_interval=0.01) as writer:
+    with stream.writer(path, thread=_thread_id, flush_interval=0.01, raw=True) as writer:
         writer("a", "b", "c", 1, 2, 3)
         writer.flush()
     
@@ -151,7 +151,7 @@ def test_large_data(tmp_path):
     
     # Write many values
     num_values = 1000
-    with stream.writer(path, thread=_thread_id, flush_interval=0.01) as writer:
+    with stream.writer(path, thread=_thread_id, flush_interval=0.01, raw=True) as writer:
         for i in range(num_values):
             writer(i, f"string_{i}", [i, i+1, i+2])
         writer.flush()
@@ -219,7 +219,7 @@ def test_async_file_persister_explicit(tmp_path):
     import retracesoftware.stream as st
 
     path = tmp_path / "async_trace.bin"
-    fw = st._backend_mod.FramedWriter(str(path))
+    fw = st._backend_mod.FramedWriter(str(path), raw=True)
     persister = st._backend_mod.AsyncFilePersister(fw)
 
     with stream.writer(output=persister, thread=_thread_id, flush_interval=0.01) as w:
@@ -242,7 +242,7 @@ def test_async_persister_large_data(tmp_path):
     path = tmp_path / "large_trace.bin"
 
     num_values = 5000
-    with stream.writer(path, thread=_thread_id, flush_interval=0.005) as w:
+    with stream.writer(path, thread=_thread_id, flush_interval=0.005, raw=True) as w:
         for i in range(num_values):
             w(i, f"val_{i}")
         w.flush()

@@ -6,13 +6,10 @@
 #include <thread>
 #include <sstream>
 #include <structmember.h>
-#include <unordered_map>
 
 namespace retracesoftware_stream {
 
     static FILE * open(PyObject * path) {
-        // int fd = open(PyUnicode_AsUTF8(path_str), O_WRONLY | O_CREAT | O_EXCL, 0644);
-        
         FILE * file = fopen(PyUnicode_AsUTF8(path), "rb");
 
         if (!file) {
@@ -20,21 +17,8 @@ namespace retracesoftware_stream {
             throw nullptr;
         }
 
-        // int fd = fileno(file);
-        
-        // if (flock(fd, LOCK_EX | LOCK_NB) == -1) {
-        //     fprintf(stderr, "TRIED TO LOCK AN ALREADY LOCKED FILE!!!!\n");
-
-        //     PyErr_Format(PyExc_IOError, "Could not lock file: %S for exclusive access, error: %s", path, strerror(errno));
-        //     // perror("flock");
-        //     // // Handle locking failure: another process holds the lock
-        //     fclose(file);
-        //     throw nullptr;
-        // }
         return file;
     }
-
-    static constexpr size_t FRAME_HEADER_SIZE = 6;  // 4-byte PID + 2-byte payload length
 
     struct ObjectStream : public PyObject {
         FILE * file = nullptr;
@@ -45,7 +29,7 @@ namespace retracesoftware_stream {
         vectorcallfunc vectorcall;
         std::vector<PyObject *> handles;
         std::vector<PyObject *> filenames;
-        std::vector<PyObject *> interned_strings;  // For STR_REF lookups
+        std::vector<PyObject *> interned_strings;
 
         map<int, PyObject *> bindings;
         bool pending_bind = false;
@@ -58,21 +42,6 @@ namespace retracesoftware_stream {
         PyObject * create_dropped = nullptr;
         PyObject * create_heartbeat = nullptr;
         bool verbose = false;
-
-        bool raw_mode = false;
-
-        // PID-framed reading state (unused when raw_mode=true)
-        uint8_t* frame_data = nullptr;
-        size_t frame_capacity = 0;
-        size_t frame_pos = 0;
-        size_t frame_len = 0;
-        uint32_t frame_pid = 0;
-        uint32_t main_pid = 0;
-
-        // Per-PID buffering for skipped frames (enables PID switching on non-seekable streams)
-        std::unordered_map<uint32_t, std::vector<uint8_t>> skipped_frames;
-        std::vector<uint8_t>* replay_buf = nullptr;  // points into skipped_frames when draining
-        size_t replay_buf_pos = 0;
 
         static int init(ObjectStream * self, PyObject* args, PyObject* kwds) {
             
@@ -87,7 +56,6 @@ namespace retracesoftware_stream {
             int read_timeout = 0;
             int verbose = 0;
             long long start_offset = 0;
-            int raw = 0;
 
             static const char* kwlist[] = {
                 "path", 
@@ -100,10 +68,9 @@ namespace retracesoftware_stream {
                 "on_dropped",
                 "on_heartbeat",
                 "start_offset",
-                "raw",
                 nullptr};
 
-            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOip|OOLp", (char **)kwlist, 
+            if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOOOip|OOL", (char **)kwlist, 
                 &PyUnicode_Type, &path, 
                 &create_pickled,
                 &bind_singleton,
@@ -113,8 +80,7 @@ namespace retracesoftware_stream {
                 &verbose,
                 &create_dropped,
                 &create_heartbeat,
-                &start_offset,
-                &raw)) {
+                &start_offset)) {
                 return -1;
             }
 
@@ -122,9 +88,6 @@ namespace retracesoftware_stream {
             new (&self->filenames) std::vector<PyObject *>();
             new (&self->interned_strings) std::vector<PyObject *>();
             new (&self->bindings) map<int, PyObject *>();
-            new (&self->skipped_frames) std::unordered_map<uint32_t, std::vector<uint8_t>>();
-            self->replay_buf = nullptr;
-            self->replay_buf_pos = 0;
 
             self->create_pickled = Py_NewRef(create_pickled);
             self->bind_singleton = Py_NewRef(bind_singleton);
@@ -134,7 +97,6 @@ namespace retracesoftware_stream {
             self->create_heartbeat = Py_XNewRef(create_heartbeat);
             self->read_timeout = read_timeout;
             self->verbose = verbose;
-            self->raw_mode = (raw != 0);
 
             self->vectorcall = (vectorcallfunc)call;
 
@@ -159,20 +121,9 @@ namespace retracesoftware_stream {
         }
 
         static void dealloc(ObjectStream* self) {
-            // if (self->file) {
-            //     fclose(self->file);
-            //     self->file = nullptr;
-            // }
-            
-            // self->handles.~std::vector<PyObject *>();
-
             PyObject_GC_UnTrack(self);
             clear(self);
 
-            free(self->frame_data);
-            self->frame_data = nullptr;
-
-            self->skipped_frames.~unordered_map();
             self->handles.std::vector<PyObject *>::~vector();
             self->filenames.std::vector<PyObject *>::~vector();
             self->interned_strings.std::vector<PyObject *>::~vector();
@@ -221,7 +172,7 @@ namespace retracesoftware_stream {
             return 0;
         }
 
-        void raw_read(uint8_t * bytes, size_t size) {
+        void read(uint8_t * bytes, size_t size) {
             size_t r = fread(bytes, sizeof(uint8_t), size, file);
 
             if (r < size) {
@@ -235,106 +186,6 @@ namespace retracesoftware_stream {
                             << " milliseconds";
                     throw std::runtime_error(message.str());
                 }
-            }
-        }
-
-        void buffer_payload(uint32_t pid, uint16_t payload_len) {
-            auto& buf = skipped_frames[pid];
-            size_t old_size = buf.size();
-            buf.resize(old_size + payload_len);
-            raw_read(buf.data() + old_size, payload_len);
-        }
-
-        void load_frame(uint16_t payload_len) {
-            if (payload_len > frame_capacity) {
-                uint8_t* new_buf = (uint8_t*)realloc(frame_data, payload_len);
-                if (!new_buf) {
-                    throw std::runtime_error("Failed to allocate frame buffer");
-                }
-                frame_data = new_buf;
-                frame_capacity = payload_len;
-            }
-            frame_pos = 0;
-            frame_len = payload_len;
-        }
-
-        void read_next_frame() {
-            // First, drain any buffered frames for current main_pid
-            if (replay_buf && replay_buf_pos < replay_buf->size()) {
-                size_t avail = replay_buf->size() - replay_buf_pos;
-                load_frame((uint16_t)std::min(avail, (size_t)UINT16_MAX));
-                size_t to_copy = frame_len;
-                memcpy(frame_data, replay_buf->data() + replay_buf_pos, to_copy);
-                replay_buf_pos += to_copy;
-                if (replay_buf_pos >= replay_buf->size()) {
-                    replay_buf->clear();
-                    replay_buf = nullptr;
-                    replay_buf_pos = 0;
-                }
-                frame_pid = main_pid;
-                return;
-            }
-
-            while (true) {
-                uint8_t header[FRAME_HEADER_SIZE];
-                raw_read(header, FRAME_HEADER_SIZE);
-
-                uint32_t pid = (uint32_t)header[0] | ((uint32_t)header[1] << 8) |
-                               ((uint32_t)header[2] << 16) | ((uint32_t)header[3] << 24);
-                uint16_t payload_len = (uint16_t)header[4] | ((uint16_t)header[5] << 8);
-
-                if (main_pid == 0) main_pid = pid;
-
-                if (pid != main_pid) {
-                    buffer_payload(pid, payload_len);
-                    continue;
-                }
-
-                frame_pid = pid;
-                load_frame(payload_len);
-                raw_read(frame_data, payload_len);
-                return;
-            }
-        }
-
-        void set_pid(uint32_t new_pid) {
-            main_pid = new_pid;
-            frame_pos = 0;
-            frame_len = 0;
-            auto it = skipped_frames.find(new_pid);
-            if (it != skipped_frames.end() && !it->second.empty()) {
-                replay_buf = &it->second;
-                replay_buf_pos = 0;
-            } else {
-                replay_buf = nullptr;
-                replay_buf_pos = 0;
-            }
-        }
-
-        static PyObject* py_set_pid(ObjectStream* self, PyObject* args) {
-            unsigned int pid;
-            if (!PyArg_ParseTuple(args, "I", &pid)) return nullptr;
-            self->set_pid((uint32_t)pid);
-            Py_RETURN_NONE;
-        }
-
-        void read(uint8_t * bytes, size_t size) {
-            if (raw_mode) {
-                raw_read(bytes, size);
-                bytes_read += size;
-                return;
-            }
-            size_t total = 0;
-            while (total < size) {
-                size_t avail = frame_len - frame_pos;
-                if (avail == 0) {
-                    read_next_frame();
-                    avail = frame_len - frame_pos;
-                }
-                size_t to_copy = std::min(size - total, avail);
-                memcpy(bytes + total, frame_data + frame_pos, to_copy);
-                frame_pos += to_copy;
-                total += to_copy;
             }
             bytes_read += size;
         }
@@ -962,8 +813,6 @@ namespace retracesoftware_stream {
     static PyMethodDef methods[] = {
         {"bind", (PyCFunction)ObjectStream::py_bind, METH_O, "TODO"},
         {"close", (PyCFunction)ObjectStream::py_close, METH_NOARGS, "TODO"},
-        {"set_pid", (PyCFunction)ObjectStream::py_set_pid, METH_VARARGS,
-         "Switch PID filter and drain any buffered frames for the new PID"},
         {"file_offset", (PyCFunction)ObjectStream::py_file_offset, METH_NOARGS,
          "Return the current file read position"},
         {"reopen", (PyCFunction)ObjectStream::py_reopen, METH_VARARGS,

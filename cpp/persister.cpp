@@ -65,8 +65,15 @@ namespace retracesoftware_stream {
         std::atomic<uint64_t> processed_cursor{0};
 
         QEntry consume_next() {
-            QEntry* ep;
-            while (!(ep = queue->front())) std::this_thread::yield();
+            QEntry* ep = queue->front();
+            if (!ep) {
+                // Queue empty while mid-compound-value: release the GIL so the
+                // return thread can drain its queue and update total_removed,
+                // which in turn unblocks the producer's wait_for_inflight().
+                PyThreadState* _save = PyEval_SaveThread();
+                while (!(ep = queue->front())) std::this_thread::yield();
+                PyEval_RestoreThread(_save);
+            }
             QEntry v = *ep;
             queue->pop();
             return v;
